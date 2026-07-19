@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>투자설명서 항목 추출기</title>
+<link rel="stylesheet" href="styles/styles.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="title-block">
+    <h1>투자설명서 항목 추출기</h1>
+    <span class="eyebrow">skeleton v0.1</span>
+  </div>
+  <div class="stat-row">
+    <div><b id="statPages">–</b>총 페이지</div>
+    <div><b id="statChars">–</b>추출 글자수</div>
+  </div>
+</header>
+
+<main>
+  <!-- 좌측: 업로드 -->
+  <section>
+    <h2>PDF 업로드</h2>
+
+    <div class="upload-slot">
+      <div class="upload-slot-label">① 투자설명서</div>
+      <div id="dropzone">
+        <span class="icon">📄</span>
+        <div class="main-txt">투자설명서 PDF를 끌어다 놓거나 클릭</div>
+        <div class="sub-txt">텍스트 선택 가능한 PDF만 지원 (스캔본 X)</div>
+        <input type="file" id="fileInput" accept="application/pdf" />
+      </div>
+
+      <div class="file-meta" id="fileMeta" style="display:none;">
+        <div class="fname" id="fname"></div>
+        <div id="fsize"></div>
+      </div>
+
+      <div id="progressWrap">
+        <div id="progressBar"><div id="progressFill"></div></div>
+        <div id="progressLabel">페이지 읽는 중…</div>
+      </div>
+    </div>
+
+    <div class="upload-slot">
+      <div class="upload-slot-label">② 신탁계약서(집합투자규약서) <span class="pn-hint">펀드영업일구분 자동추출용</span></div>
+      <div id="dropzoneTrust">
+        <span class="icon">📑</span>
+        <div class="main-txt">신탁계약서 PDF를 끌어다 놓거나 클릭</div>
+        <div class="sub-txt">"영업일"이라 함은 ~ 정의 조항에서 펀드영업일구분을 판단해요</div>
+        <input type="file" id="fileInputTrust" accept="application/pdf" />
+      </div>
+
+      <div class="file-meta" id="fileMetaTrust" style="display:none;">
+        <div class="fname" id="fnameTrust"></div>
+        <div id="fsizeTrust"></div>
+      </div>
+
+      <div id="progressWrapTrust">
+        <div id="progressBarTrust"><div id="progressFillTrust"></div></div>
+        <div id="progressLabelTrust">페이지 읽는 중…</div>
+      </div>
+    </div>
+
+    <div class="hint-box">
+      <b>사용 순서</b><br/>
+      1. 투자설명서 업로드 → 상품명·상품공통정보(위험등급/운용회사/매수일수/환매체결·결제일수)가 자동으로 채워져요<br/>
+      2. 신탁계약서 업로드 → 펀드영업일구분(당사영업일/증권거래소/해외영업일)이 자동으로 판단돼요<br/>
+      3. 클래스 코드는 <b>클래스 선택</b> 표에서 클릭해서 확정<br/>
+      4. 값이 이상하면 칸을 직접 클릭해서 수정 (칸 아래 <i>기울임체</i>는 못 찾은 항목)<br/><br/>
+      운용사마다 매입/환매방법, "영업일" 정의 표현이 달라 100% 정확하진 않아요. 못 찾았거나 값이 틀렸으면 가운데 원문 탭을 바꿔서 "매입방법", "환매방법", "영업일"을 직접 검색해 고쳐주세요.<br/><br/>
+      <b>색상 안내</b> — 필수기입사항: 노란색(값이 채워져도 계속 노란색 유지) · 그 외 전부: 흰색
+    </div>
+  </section>
+
+
+
+  <!-- 가운데: 원문 -->
+  <section>
+    <h2>추출된 원문 <span style="font-weight:400; font-size:11px; color:var(--ink-soft); text-transform:none; letter-spacing:0;">(검증용 — 못 찾은 항목 확인할 때만 사용)</span></h2>
+    <div class="doc-tabs">
+      <button type="button" class="doc-tab active" id="docTabProspectus" data-doc="prospectus">투자설명서</button>
+      <button type="button" class="doc-tab" id="docTabTrustDeed" data-doc="trustDeed">신탁계약서</button>
+    </div>
+    <div id="searchRow">
+      <input id="searchInput" placeholder="본문에서 직접 검색 (예: 설정일, 보수율, 영업일…)" />
+      <button class="btn secondary" id="prevMatch">◀</button>
+      <button class="btn secondary" id="nextMatch">▶</button>
+    </div>
+    <div id="matchInfo"></div>
+    <div id="textView"><div id="emptyText">PDF를 업로드하면 여기에 전체 텍스트가 표시됩니다.</div></div>
+  </section>
+
+  <!-- 우측: 항목 -->
+  <section>
+    <h2>상품명</h2>
+    <div class="pn-card" id="productNameForm">
+      <div class="pn-field-grid">
+        <div class="pn-field">
+          <label for="krName">한글펀드명<span class="pn-req">*</span></label>
+          <input class="is-required" type="text" id="krName" placeholder="예: 글로벌성장주식펀드" />
+        </div>
+        <div class="pn-field">
+          <label for="shortName">약칭펀드명<span class="pn-hint">간략 표기</span></label>
+          <input class="is-required" type="text" id="shortName" placeholder="예: 글로벌성장주식" />
+        </div>
+        <div class="pn-field">
+          <label for="smsName">SMS발송용펀드명<span class="pn-hint">최대 표시 길이 고려</span></label>
+          <input type="text" id="smsName" placeholder="예: 글로벌성장주식펀드" />
+        </div>
+      </div>
+
+      <div class="pn-class-hierarchy">
+        <div class="pn-label-row">
+          <h3>클래스한글명 분류 체계</h3>
+          <p>1차 → 2차 → 3차 순으로 세부 분류</p>
+        </div>
+        <div class="pn-class-track">
+          <div class="pn-class-step">
+            <span class="pn-tier">1차</span>
+            <select class="is-required" id="class1"></select>
+          </div>
+          <div class="pn-arrow">↓</div>
+          <div class="pn-class-step">
+            <span class="pn-tier">2차</span>
+            <select class="is-required" id="class2"></select>
+          </div>
+          <div class="pn-arrow">↓</div>
+          <div class="pn-class-step">
+            <span class="pn-tier">3차</span>
+            <select id="class3"></select>
+          </div>
+        </div>
+        <div id="classMatchHint" class="pn-class-hint">1차를 선택하면 실제 코드와 대조해서 보여드려요.</div>
+      </div>
+    </div>
+
+    <h2 style="margin-top:28px;">클래스 선택 <span style="font-weight:400; font-size:11px; color:var(--ink-soft); text-transform:none; letter-spacing:0;">(운용사 자동 감지 · 코드 클릭하면 확정)</span></h2>
+    <div class="pn-card" id="classChecker">
+      <div class="pn-label-row">
+        <p>PDF에서 운용사를 자동으로 찾아 아래 운용사가 자동 선택돼요. 등록하려는 클래스 코드를 표에서 클릭하면 1~3차에 반영되고, 한글펀드명 뒤에 코드가 붙습니다.</p>
+      </div>
+      <div class="pn-field">
+        <label for="checkCompany">운용사</label>
+        <select id="checkCompany"></select>
+      </div>
+      <div id="checkTableWrap">
+        <table id="checkTable"></table>
+      </div>
+    </div>
+
+    <h2 style="margin-top:28px;">상품공통정보 <span style="font-weight:400; font-size:11px; color:var(--ink-soft); text-transform:none; letter-spacing:0;">(PDF에서 자동 추출 — 잘못됐으면 직접 수정 가능)</span></h2>
+    <div class="pn-card" id="commonInfoForm">
+      <div class="ci-row-2col">
+        <div class="pn-field">
+          <label for="ciRiskGrade">상품위험등급</label>
+          <input class="is-required" type="text" id="ciRiskGrade" readonly placeholder="미입력" />
+        </div>
+        <div class="pn-field">
+          <label for="ciManager">펀드운용회사</label>
+          <input class="is-required" type="text" id="ciManager" readonly placeholder="미입력" />
+        </div>
+      </div>
+
+      <div class="ci-flatwrap">
+        <div class="ci-flatrow">
+          <span class="ci-flat-tier">장 마감전 거래일수</span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>매수일수</label><input class="is-required" type="text" id="ciBuyBefore" placeholder="미입력" /></span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-group">판매중</span>
+          <span class="ci-flat-field"><label>환매체결일수</label><input class="is-required" type="text" id="ciOnBeforeExec" placeholder="미입력" /></span>
+          <span class="ci-flat-slash">/</span>
+          <span class="ci-flat-field"><label>환매결제일수</label><input class="is-required" type="text" id="ciOnBeforeSettle" placeholder="미입력" /></span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-group">판매후</span>
+          <span class="ci-flat-field"><label>환매체결일수</label><input class="is-required" type="text" id="ciPostBeforeExec" placeholder="미입력" /></span>
+          <span class="ci-flat-slash">/</span>
+          <span class="ci-flat-field"><label>환매결제일수</label><input class="is-required" type="text" id="ciPostBeforeSettle" placeholder="미입력" /></span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-tier">장 마감후 거래일수</span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>매수일수</label><input class="is-required" type="text" id="ciBuyAfter" placeholder="미입력" /></span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-group">판매중</span>
+          <span class="ci-flat-field"><label>환매체결일수</label><input class="is-required" type="text" id="ciOnAfterExec" placeholder="미입력" /></span>
+          <span class="ci-flat-slash">/</span>
+          <span class="ci-flat-field"><label>환매결제일수</label><input class="is-required" type="text" id="ciOnAfterSettle" placeholder="미입력" /></span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-group">판매후</span>
+          <span class="ci-flat-field"><label>환매체결일수</label><input class="is-required" type="text" id="ciPostAfterExec" placeholder="미입력" /></span>
+          <span class="ci-flat-slash">/</span>
+          <span class="ci-flat-field"><label>환매결제일수</label><input class="is-required" type="text" id="ciPostAfterSettle" placeholder="미입력" /></span>
+        </div>
+      </div>
+
+    </div>
+
+    <h2 style="margin-top:28px;">상품공통정보 <span style="font-weight:400; font-size:11px; color:var(--ink-soft); text-transform:none; letter-spacing:0;">(PDF에서 자동 추출)</span></h2>
+    <div class="pn-card" id="fundClassForm">
+      <div class="ci-flatwrap">
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>펀드종류구분</label>
+            <select class="is-required" id="fcKind">
+              <option value="">미입력</option>
+              <option value="외화표시펀드">외화표시펀드</option>
+              <option value="수익증권">수익증권</option>
+              <option value="국내뮤추얼">국내뮤추얼</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>펀드유형구분</label>
+            <select class="is-required" id="fcType">
+              <option value="">미입력</option>
+              <option value="주식혼합형">주식혼합형</option>
+              <option value="채권혼합형">채권혼합형</option>
+              <option value="특별자산투자">특별자산투자</option>
+              <option value="주식형">주식형</option>
+              <option value="채권형">채권형</option>
+              <option value="MMF(개인)">MMF(개인)</option>
+              <option value="파생상품">파생상품</option>
+              <option value="부동산투자">부동산투자</option>
+              <option value="MMF(법인)">MMF(법인)</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>펀드형태구분</label>
+            <select class="is-required" id="fcForm">
+              <option value="">미입력</option>
+              <option value="추가형">추가형</option>
+              <option value="청산형">청산형</option>
+              <option value="단위형">단위형</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>환매가능유형구분</label>
+            <select class="is-required" id="fcRedeemType">
+              <option value="">미입력</option>
+              <option value="개방형">개방형</option>
+              <option value="폐쇄형">폐쇄형</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>파생투자여부</label>
+            <select class="is-required" id="fcDerivative">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>펀드유형(자본시장법상)</label>
+            <select class="is-required" id="fcCapitalType">
+              <option value="">미입력</option>
+              <option value="증권">증권</option>
+              <option value="부동산">부동산</option>
+              <option value="특별자산">특별자산</option>
+              <option value="혼합자산">혼합자산</option>
+              <option value="단기금융">단기금융</option>
+            </select>
+          </span>
+          <span class="ci-flat-field"><select class="is-required" id="fcCapitalSubType" disabled><option value="">－</option></select></span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>파생결합증권편입구분<span class="pn-hint">미사용</span></label>
+            <select class="is-required" id="fcElsUsage">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>펀드유형(수익률평가)</label>
+            <select class="is-required" id="fcYieldType">
+              <option value="">미입력</option>
+              <option value="국내주식형">국내주식형</option>
+              <option value="국내채권형">국내채권형</option>
+              <option value="국내혼합형">국내혼합형</option>
+              <option value="해외주식형">해외주식형</option>
+              <option value="해외채권형">해외채권형</option>
+              <option value="해외혼합형">해외혼합형</option>
+              <option value="대체투자">대체투자</option>
+              <option value="해당없음">해당없음</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>적정성원칙 대상여부<span class="pn-hint">고령/부적합 숙려</span></label>
+            <select class="is-required" id="fcSuitability">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+              <option value="비중확인필요">비중확인필요</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>고난도상품여부</label>
+            <select class="is-required" id="fcHighDifficulty">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>PB전용(PRIME)여부</label>
+            <select class="is-required" id="fcPbPrime">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>고난도적정성사전교육대상</label>
+            <select class="is-required" id="fcPreEducation">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>수탁사</label>
+            <select class="is-required" id="fcTrustee">
+              <option value="">미입력</option>
+              <option value="산업은행">산업은행</option>
+              <option value="기업은행">기업은행</option>
+              <option value="국민은행">국민은행</option>
+              <option value="외환은행">외환은행</option>
+              <option value="수협">수협</option>
+              <option value="농협중앙회">농협중앙회</option>
+              <option value="농협 (단위)">농협 (단위)</option>
+              <option value="우리은행">우리은행</option>
+              <option value="제일은행">제일은행</option>
+              <option value="서울은행">서울은행</option>
+              <option value="한미은행">한미은행</option>
+              <option value="대구은행">대구은행</option>
+              <option value="부산은행">부산은행</option>
+              <option value="광주은행">광주은행</option>
+              <option value="제주은행">제주은행</option>
+              <option value="전북은행">전북은행</option>
+              <option value="경남은행">경남은행</option>
+              <option value="새마을금고">새마을금고</option>
+              <option value="신용협동조합">신용협동조합</option>
+              <option value="상호신용금고">상호신용금고</option>
+              <option value="체이스맨해탄은행">체이스맨해탄은행</option>
+              <option value="씨티은행">씨티은행</option>
+              <option value="홍콩상하이은행">홍콩상하이은행</option>
+              <option value="도이치은행">도이치은행</option>
+              <option value="다이이찌강코">다이이찌강코</option>
+              <option value="도쿄미쯔비시">도쿄미쯔비시</option>
+              <option value="우체국">우체국</option>
+              <option value="하나은행">하나은행</option>
+              <option value="평화은행">평화은행</option>
+              <option value="신한은행">신한은행</option>
+              <option value="증권금융">증권금융</option>
+              <option value="미래에셋증권">미래에셋증권</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>사무수탁사</label>
+            <select id="fcAdminCompany">
+              <option value="">미입력</option>
+              <option value="한화투신운용(주)">한화투신운용(주)</option>
+              <option value="하나펀드서비스">하나펀드서비스</option>
+              <option value="(주)코스콤펀드서비스">(주)코스콤펀드서비스</option>
+              <option value="미래에셋증권">미래에셋증권</option>
+              <option value="신한금융투자">신한금융투자</option>
+              <option value="삼성투신운용(주)">삼성투신운용(주)</option>
+              <option value="우리펀드서비스(주)">우리펀드서비스(주)</option>
+              <option value="삼성증권">삼성증권</option>
+              <option value="신한펀드파트너스">신한펀드파트너스</option>
+              <option value="한국펀드파트너스">한국펀드파트너스</option>
+              <option value="HSBC 펀드서비스">HSBC 펀드서비스</option>
+              <option value="SC제일펀드서비스(회계팀)">SC제일펀드서비스(회계팀)</option>
+              <option value="SC제일펀드서비스">SC제일펀드서비스</option>
+              <option value="외환펀드서비스">외환펀드서비스</option>
+              <option value="KB펀드파트너스">KB펀드파트너스</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field">
+            <label>최초설정일자</label>
+            <span class="date-combo">
+              <input class="is-required" type="text" id="fcInceptionDate" placeholder="YYYY-MM-DD" maxlength="10" />
+              <button type="button" class="date-cal-btn" data-for="fcInceptionDatePicker">📅</button>
+              <input type="date" id="fcInceptionDatePicker" class="date-picker-hidden" tabindex="-1" />
+            </span>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field">
+            <label>차기결산예정일</label>
+            <span class="date-combo">
+              <input class="is-required" type="text" id="fcNextSettlement" placeholder="YYYY-MM-DD" maxlength="10" />
+              <button type="button" class="date-cal-btn" data-for="fcNextSettlementPicker">📅</button>
+              <input type="date" id="fcNextSettlementPicker" class="date-picker-hidden" tabindex="-1" />
+            </span>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>펀드영업일구분</label>
+            <select class="is-required" id="fcBizDayType">
+              <option value="">미입력</option>
+              <option value="당사영업일">당사영업일</option>
+              <option value="증권거래소">증권거래소</option>
+              <option value="해외영업일">해외영업일</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>신탁결산주기</label>
+            <input type="text" id="fcSettlementCycle" class="auto-filled is-required" value="12월" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>보수계산주기</label>
+            <input type="text" id="fcFeeCalcCycle" class="auto-filled is-required" value="3월" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>최단저축기간</label>
+            <input type="text" id="fcMinSavingPeriod" class="auto-filled is-required" value="12월" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>최장저축기간</label>
+            <input type="text" id="fcMaxSavingPeriod" class="auto-filled is-required" value="999월" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>장 마감전 요청일수</label>
+            <input type="text" id="fcBeforeCloseReqDays" class="auto-filled is-required" value="1" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>장 마감후 요청일수</label>
+            <input type="text" id="fcAfterCloseReqDays" class="auto-filled is-required" value="1" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>장마감시각</label>
+            <input class="is-required" type="text" id="ciMarketCloseTime" placeholder="HH:MM:SS" />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>전환가능횟수</label>
+            <input type="text" id="fcConvertCount" class="auto-filled is-required" value="0" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>투자설명서버전</label>
+            <input type="text" id="fcProspectusVersion" class="auto-filled is-required" value="1" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>고령층계약알림여부</label>
+            <select class="is-required" id="fcElderlyNotice">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>레버리지 해피콜여부</label>
+            <select class="is-required" id="fcLeverageHappyCall">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>후순위채권 해피콜여부</label>
+            <input type="text" id="fcSubordinatedBondHappyCall" class="auto-filled is-required" value="아니오" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>조건부자본증권_상각형 해피콜여부</label>
+            <input type="text" id="fcCocaWriteoffHappyCall" class="auto-filled is-required" value="아니오" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>조건부자본증권_전환형 해피콜여부</label>
+            <input type="text" id="fcCocaConversionHappyCall" class="auto-filled is-required" value="아니오" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>소규모펀드 여부</label>
+            <input type="text" id="fcSmallFund" class="auto-filled is-required" value="아니오" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>거래통화코드</label>
+            <select class="is-required" id="fcCurrencyCode">
+              <option value="">미입력</option>
+              <option value="KRW(원)">KRW(원)</option>
+              <option value="USD(달러)">USD(달러)</option>
+              <option value="JPY(엔)">JPY(엔)</option>
+              <option value="EUR(유로)">EUR(유로)</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>환율적용단위</label>
+            <input type="text" id="fcExchangeUnit" class="auto-filled is-required" value="1" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>금액소수자리수</label>
+            <select class="is-required" id="fcAmountDecimalDigits">
+              <option value="">미입력</option>
+              <option value="0">0</option>
+              <option value="2">2</option>
+            </select>
+          </span>
+        </div>
+      </div>
+
+    </div>
+
+    <h2 style="margin-top:28px;">상품개별정보 <span style="font-weight:400; font-size:11px; color:var(--ink-soft); text-transform:none; letter-spacing:0;">(약칭펀드명·클래스 선택 기준 자동 계산 — 코드류는 직접 입력)</span></h2>
+    <div class="pn-card" id="individualInfoForm">
+      <div class="ci-flatwrap">
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>전환그룹코드(명)</label>
+            <input type="text" id="piConvertGroupName" class="ci-xwide" placeholder="미입력" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>클래스구분</label>
+            <select id="piClassDivision">
+              <option value="">미입력</option>
+              <option value="A Class">A Class</option>
+              <option value="Ae Class">Ae Class</option>
+              <option value="B Class">B Class</option>
+              <option value="C1 Class">C1 Class</option>
+              <option value="C2 Class">C2 Class</option>
+              <option value="C3 Class">C3 Class</option>
+              <option value="C4 Class">C4 Class</option>
+              <option value="C5 Class">C5 Class</option>
+              <option value="Ce Class">Ce Class</option>
+              <option value="CP Class">CP Class</option>
+              <option value="CPe Class">CPe Class</option>
+              <option value="CW Class">CW Class</option>
+              <option value="D Class">D Class</option>
+              <option value="F Class">F Class</option>
+              <option value="I Class">I Class</option>
+              <option value="A-G Class">A-G Class</option>
+              <option value="C-G Class">C-G Class</option>
+              <option value="C-O Class">C-O Class</option>
+              <option value="C-Oe Class">C-Oe Class</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>전환가능여부</label>
+            <input type="text" id="piConvertible" placeholder="미입력" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>인터넷뱅킹판매</label>
+            <select id="piInternetBanking">
+              <option value="">미입력</option>
+              <option value="인터넷전용판매">인터넷전용판매</option>
+              <option value="인터넷판매불가">인터넷판매불가</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>예탁원펀드코드</label>
+            <input type="text" id="piKsdFundCode" class="auto-filled ci-wide" value="종목코드(KRZ)" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>예탁원그룹코드</label>
+            <input type="text" id="piKsdGroupCode" class="auto-filled ci-wide" value="12자리숫자" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>협회펀드코드</label>
+            <input type="text" id="piKofiaFundCode" class="auto-filled ci-wide" value="협회표준코드" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>총보수</label>
+            <input class="is-required" type="text" id="piTotalFee" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>판매사보수율</label>
+            <input class="is-required" type="text" id="piSaleFeeRate" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>수수료징수방법</label>
+            <select class="is-required" id="piFeeCollectMethod">
+              <option value="">미입력</option>
+              <option value="선취">선취</option>
+              <option value="후취">후취</option>
+              <option value="미징구">미징구</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>운용사보수율</label>
+            <input type="text" id="piManageFeeRate" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>수탁사보수율</label>
+            <input type="text" id="piTrusteeFeeRate" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>사무수탁사 보수율</label>
+            <input type="text" id="piAdminFeeRate" placeholder="미입력" />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>합성총보수발생펀드</label>
+            <select class="is-required" id="piSyntheticFeeFundYn">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>합성총보수</label>
+            <input type="text" id="piSyntheticFee" placeholder="미입력" />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>투자지역/섹터</label>
+            <input type="text" id="piInvestRegionSector" class="ci-wide" placeholder="미입력" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>펀드특성구분</label>
+            <input type="text" id="piFundCharacterType" class="ci-wide is-required" placeholder="미입력" readonly />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>감면상품구분</label>
+            <input type="text" id="piTaxReductionType" class="ci-wide is-required" placeholder="미입력" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>(임) 개설가능</label>
+            <select id="piOpenableIm">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>(적) 개설가능</label>
+            <select id="piOpenableJeok">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>(거) 개설가능</label>
+            <select id="piOpenableGeo">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>(임)신규최저금액</label>
+            <input class="is-required" type="text" id="piImNewMin" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>(적)신규최저금액</label>
+            <input class="is-required" type="text" id="piJeokNewMin" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>(거)신규최저금액</label>
+            <input class="is-required" type="text" id="piGeoNewMin" placeholder="미입력" />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>(임)추가최저금액</label>
+            <input class="is-required" type="text" id="piImAddMin" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>(적)추가최저금액</label>
+            <input class="is-required" type="text" id="piJeokAddMin" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>신규최대금액</label>
+            <input type="text" id="piNewMax" placeholder="미입력" />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>신규매입단위금액</label>
+            <input class="is-required" type="text" id="piNewBuyUnit" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>추가매입단위금액</label>
+            <input class="is-required" type="text" id="piAddBuyUnit" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>환매단위금액</label>
+            <input class="is-required" type="text" id="piRedeemUnit" placeholder="미입력" />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>좌당기준가격</label>
+            <input class="is-required" type="text" id="piNavPerUnit" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>기준가산정단위</label>
+            <input class="is-required" type="text" id="piNavCalcUnit" placeholder="미입력" />
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>환매수수료면제</label>
+            <input type="text" id="piRedeemFeeExempt" class="auto-filled is-required" value="0월" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>개인개설가능</label>
+            <select id="piOpenIndiv">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>개인사업자개설가능</label>
+            <select id="piOpenBizIndiv">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>법인개설가능</label>
+            <select id="piOpenCorp">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>생계형가능</label>
+            <select id="piLivelihood">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>세금우대가능</label>
+            <select id="piTaxBenefit">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>특별중도해지</label>
+            <select id="piSpecialEarlyTermination">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>분리과세가능</label>
+            <select id="piSeparateTaxation">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>비거주자개설</label>
+            <select id="piNonResident">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>해외상장주식 비과세여부</label>
+            <select id="piOverseasListedTaxExempt">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>전문투자자전용여부</label>
+            <select id="piProfessionalOnly">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>클린클래스여부</label>
+            <select id="piCleanClass">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>추천펀드구분</label>
+            <input type="text" id="piRecommendedFundType" class="ci-wide" placeholder="미입력" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>본인당행 질권설정 가능여부</label>
+            <select id="piPledgeSelf">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>제3자당행 질권설정 가능여부</label>
+            <select id="piPledgeThirdParty">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>질권설정비율</label>
+            <input class="is-required" type="text" id="piPledgeRatio" placeholder="미입력" readonly />
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>ISA가능여부(신탁형)</label>
+            <select id="piIsaTrust">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+              <option value="담당자확인필요">담당자확인필요</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>ISA가능여부(일임형)</label>
+            <select id="piIsaDiscretionary">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+              <option value="담당자확인필요">담당자확인필요</option>
+            </select>
+          </span>
+        </div>
+
+        <div class="ci-flatrow">
+          <span class="ci-flat-field"><label>판매사이동가능여부</label>
+            <select id="piDealerTransfer">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>비율이체가능여부</label>
+            <select id="piRatioTransfer">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+          <span class="ci-flat-sep">|</span>
+          <span class="ci-flat-field"><label>태블릿뱅킹 신규가능여부</label>
+            <select id="piTabletBanking">
+              <option value="">미입력</option>
+              <option value="예">예</option>
+              <option value="아니오">아니오</option>
+            </select>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <h2 style="margin-top:28px;">위험등급변경이력 <span class="pn-hint">(펀드특징 — 요약정보의 투자전략, 수익구조에서 자동 추출)</span></h2>
+    <div class="pn-card" id="fundCharForm">
+      <div class="pn-field-grid">
+        <div class="pn-field">
+          <label>요약정보</label>
+          <textarea id="piSummaryInfo" class="pi-fundchar-textarea" placeholder="미입력"></textarea>
+        </div>
+        <div class="pn-field">
+          <label>이익손실발생구조</label>
+          <textarea id="piProfitLossStructure" class="pi-fundchar-textarea" placeholder="미입력"></textarea>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="src/utils.js"></script>
+<script src="src/class-rules.js"></script>
+<script src="src/class-checker.js"></script>
+<script src="src/product-name.js"></script>
+<script src="src/product-common-info.js"></script>
+<script src="src/product-fund-classification.js"></script>
+<script src="src/product-individual-info.js"></script>
+<script src="src/product-fund-characteristics.js"></script>
+<script src="src/script.js"></script>
+</body>
+</html>
