@@ -204,24 +204,78 @@ function feeTryFull(tokens) {
   };
 }
 
-// 해석2) "간략 N칸"(운용/신탁/사무관리보수 3칸이 공통이라 이 행엔 아예 없는 서식):
-// tokens[0]=판매사보수, tokens[1]=총보수, tokens[5]=합성총보수. 공통값(triple)은 별도로 채워야 함.
-function feeTryReduced(tokens) {
-  if (tokens.length < 2) return null;
+// 판매사보수·총보수를 "몇 번째 칸인지"로 찾지 않고 "총보수 = 공통값 합 + 판매사보수"라는
+// 관계식 자체로 찾는다. 대시(동종유형총보수 등)가 토큰으로 잡히는지 여부, 앞에 다른 값이
+// 더 끼어있는지 등으로 행마다 실제 칸 수가 들쑥날쑥해서 위치 기준으로는 계속 틀어지기
+// 때문에(예: Ae처럼 다른 행과 칸 수가 다르면 바로 어긋남), 값 자체로 찾는 게 훨씬 안전하다.
+// tripleSum이 아직 없으면(공통값을 찾는 1차 단계 등) 옛 방식대로 앞 두 칸을 추정값으로 씀.
+function feeFindSaleTotal(tokens, tripleSum) {
+  if (tripleSum !== null && tripleSum !== undefined && !Number.isNaN(tripleSum)) {
+    for (let i = 0; i < tokens.length; i++) {
+      const x = feeToNum(tokens[i]);
+      if (Number.isNaN(x)) continue;
+      for (let j = 0; j < tokens.length; j++) {
+        if (i === j) continue;
+        const y = feeToNum(tokens[j]);
+        if (Number.isNaN(y)) continue;
+        if (Math.abs((x + tripleSum) - y) < 0.02) return { sale: tokens[i], total: tokens[j] };
+      }
+    }
+    // tripleSum이 있는데도 못 찾았으면(이 행은 정말 안 맞는 경우) 억지로 앞 두 칸을 쓰지 않고 실패 처리
+    return null;
+  }
   const sale = feeToNum(tokens[0]), total = feeToNum(tokens[1]);
   if ([sale, total].some(Number.isNaN)) return null;
-  return { row: { sale: tokens[0], total: tokens[1], synthetic: tokens[5] } };
+  return { sale: tokens[0], total: tokens[1] };
+}
+
+// 합성총보수(합성총보수·비용)는 항상 "증권거래비용(맨 마지막 칸)" 바로 앞칸이라, 그 앞쪽
+// (기타비용/총보수·비용/동종유형총보수)이 몇 개 있든 없든 뒤에서 두 번째라는 위치는 안 흔들린다.
+// → 앞쪽 칸 개수 변화에 안 흔들리는 유일하게 안전한 기준점이라 이건 그대로 위치 기준 사용.
+function feeFindSynthetic(tokens) {
+  const nonDash = tokens.filter(t => !/^[-－–]+$/.test(t));
+  if (nonDash.length < 2) return undefined;
+  return nonDash[nonDash.length - 2];
+}
+
+// row 파싱(코드/행 경계 인식) 결과와 무관하게, region 안의 숫자만 순서대로 다 모아서
+// "이 3개 숫자를 공통 운용/신탁업자/일반사무관리보수라고 하면 여러 클래스 행에서
+// 판매사보수+공통값=총보수가 실제로 성립하는가"를 직접 검증한다.
+// PDF-to-text 라이브러리에 따라 이 공통값이 어느 라벨에 붙는지(심지어 라벨이 전혀
+// 없는 조각으로 떨어져 나가는지)가 제각각이라, buildFeeTableRows의 행 경계 인식에
+// 기대지 않는 이 방식이 훨씬 안전하다. roughRows(추정 판매/총보수) 중 과반수 이상에서
+// 식이 맞아떨어져야 채택하므로(우연히 한두 행만 맞는 건 배제), 오탐 위험도 낮다.
+function feeFindOrphanTriple(region, roughRows) {
+  if (!roughRows || roughRows.length < 2) return null;
+  const cleaned = stripPageArtifacts(region);
+  const allTokens = cleaned.split(/\s+/).filter(Boolean).filter(t => /^[-－–0-9.%]+$/.test(t));
+  const need = Math.max(3, Math.ceil(roughRows.length * 0.5));
+
+  for (let i = 0; i + 2 < allTokens.length; i++) {
+    const manage = feeToNum(allTokens[i]), trustee = feeToNum(allTokens[i + 1]), admin = feeToNum(allTokens[i + 2]);
+    if ([manage, trustee, admin].some(Number.isNaN)) continue;
+    let hits = 0;
+    for (const r of roughRows) {
+      const s = feeToNum(r.row.sale), tot = feeToNum(r.row.total);
+      if (Number.isNaN(s) || Number.isNaN(tot)) continue;
+      if (Math.abs((manage + trustee + admin + s) - tot) < 0.02) hits++;
+    }
+    if (hits >= need) {
+      return { manage: allTokens[i], trustee: allTokens[i + 1], admin: allTokens[i + 2] };
+    }
+  }
+  return null;
 }
 
 // region 전체를 훑어서: 클래스별 행(sale/total/synthetic)과, 표 안에 공통값이 끼어있다면
 // 그 공통 운용사/신탁업자/일반사무관리보수(triple)를 함께 뽑아낸다.
 //
-// "표준 10칸으로 볼지, 공통값이 낀 간략행으로 볼지"는 그 행 하나의 산술검증(합계=총보수)만으론
-// 구분이 안 된다 — 어느 쪽으로 읽어도 "앞 4칸의 합 = 5번째 칸"이라는 같은 식이 되기 때문에
-// (라벨만 다르게 붙을 뿐 더하는 숫자 자체는 동일). 그래서 행 하나가 아니라 표 전체를 보고,
-// "이 표에서 제일 흔한 토큰 개수(다수결)"로 서식을 먼저 정한다:
-//  - 다수가 짧은(7~8칸) 간략행이면 → 그보다 정확히 3칸 더 긴 행이 "공통값이 낀 행"
-//  - 다수가 긴(9칸 이상) 표준행이면 → 매 행에 다 적힌 것이므로 그대로 표준 매핑 사용
+// 1) 표에서 제일 흔한 토큰 개수(다수결)로 "간략형(공통값 없음)" vs "표준형(매 행 반복)"을 정함.
+// 2) 간략형이면: 우선 각 행을 "앞 두 칸=판매/총보수"로 대충 추정한 뒤, 그 추정치들을 가지고
+//    region 전체에서 공통값(triple)을 찾는다(feeFindOrphanTriple) — 공통값이 어느 행에
+//    끼어 나오든, 심지어 라벨 없이 완전히 떨어져 나오든 위치와 무관하게 찾아낸다.
+// 3) 공통값(과 그 합)을 알게 되면, 그 관계식으로 모든 행의 판매/총보수를 "위치가 아니라
+//    값으로" 다시 찾는다 — 이래야 Ae처럼 남들과 실제 칸 수가 다른 행도 안 틀어진다.
 function feeAnalyzeRegion(region, codesByLengthDesc, knownCodes) {
   const rows = buildFeeTableRows(region, knownCodes);
   const candidateRows = [];
@@ -239,31 +293,32 @@ function feeAnalyzeRegion(region, codesByLengthDesc, knownCodes) {
   const modeLength = Number(Object.keys(lengthCounts).sort((a, b) => lengthCounts[b] - lengthCounts[a])[0]);
   const isReducedDominant = modeLength <= 8; // 7~8칸=간략형 다수, 9칸 이상=표준(매 행 반복)형 다수
 
-  const parsed = [];
   let commonTriple = null;
-
   if (isReducedDominant) {
-    for (const r of candidateRows) {
-      const extra = r.tokens.length - modeLength;
-      if (extra === 3) {
-        // 앞 3칸을 공통값으로 떼어내고, 나머지를 그 행 고유의 간략 데이터로 다시 해석
-        const triple = { manage: r.tokens[0], trustee: r.tokens[1], admin: r.tokens[2] };
-        const own = feeTryReduced(r.tokens.slice(3));
-        if (own) {
-          const m = feeToNum(triple.manage), t = feeToNum(triple.trustee), a = feeToNum(triple.admin);
-          const s = feeToNum(own.row.sale), tot = feeToNum(own.row.total);
-          const consistent = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
-          if (consistent && !commonTriple) commonTriple = triple;
-          parsed.push({ code: r.code, kind: "embedded", row: own.row, tripleFromSelf: consistent ? triple : null });
-          continue;
-        }
+    const roughRows = candidateRows
+      .map(r => ({ row: feeFindSaleTotal(r.tokens, null) }))
+      .filter(r => r.row);
+    commonTriple = feeFindOrphanTriple(region, roughRows);
+  }
+  const tripleSum = commonTriple
+    ? feeToNum(commonTriple.manage) + feeToNum(commonTriple.trustee) + feeToNum(commonTriple.admin)
+    : null;
+
+  const parsed = [];
+  for (const r of candidateRows) {
+    if (isReducedDominant) {
+      // tripleSum을 알면 값 기준으로, 모르면(공통값을 못 찾은 경우) 위치 추정을 최후 수단으로 사용
+      const st = feeFindSaleTotal(r.tokens, tripleSum) || feeFindSaleTotal(r.tokens, null);
+      if (st) {
+        parsed.push({
+          code: r.code,
+          kind: tripleSum !== null ? "reduced" : "reduced-unverified",
+          row: { sale: st.sale, total: st.total, synthetic: feeFindSynthetic(r.tokens) },
+          tripleFromSelf: null,
+        });
       }
-      const reduced = feeTryReduced(r.tokens);
-      if (reduced) parsed.push({ code: r.code, kind: "reduced", row: reduced.row, tripleFromSelf: null });
-    }
-  } else {
-    // 표준(매 행 반복)형: 행마다 이미 운용/판매/수탁/사무관리보수가 다 적혀있으니 그대로 사용.
-    for (const r of candidateRows) {
+    } else {
+      // 표준(매 행 반복)형: 행마다 이미 운용/판매/수탁/사무관리보수가 다 적혀있으니 그대로 사용.
       const full = feeTryFull(r.tokens);
       if (full) {
         parsed.push({ code: r.code, kind: full.consistent ? "full" : "full-unverified", row: full.row, tripleFromSelf: full.triple });
@@ -452,6 +507,42 @@ function computeFeeTableValues() {
 
   return { values, confident };
 }
+
+// 콘솔 디버그용: 개발자도구(F12)에서 feeDebugDump() 실행하면 지금 인식된 보수표의
+// 모든 행(라벨/토큰), 공통값(triple), 최종 파싱 결과가 그대로 출력됨.
+// PDF-to-text 라이브러리마다 실제 토큰 순서가 달라 코드만으로는 모든 경우를 예측하기
+// 어려우므로, 이상값이 나오면 이걸로 원문 그대로를 확인해서 대응한다.
+function feeDebugDump() {
+  const region = findFeeTableRegion();
+  if (!region) { console.log("[보수표] 표 영역(앵커)을 못 찾음"); return; }
+  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
+  const knownCodes = new Set(activeCodes.map(c => normalizeCodeKey(c)));
+  const codesByLengthDesc = activeCodes.slice().sort((a, b) => b.length - a.length);
+
+  const rows = buildFeeTableRows(region, knownCodes);
+  console.log("[보수표] 활성 클래스 코드:", activeCodes);
+  console.log("[보수표] 인식된 행 " + rows.length + "개:");
+  rows.forEach((r, i) => {
+    const code = extractRowCodeFromLabelLine(r.label) ||
+      (isCodeLikeToken(r.label) ? r.label : null) ||
+      extractTrailingKnownCode(r.label, codesByLengthDesc);
+    console.log(
+      "  #" + i, "code=" + (code || "(인식실패)"),
+      "tokens=" + JSON.stringify(r.tokens),
+      "label끝=…" + r.label.slice(-30)
+    );
+  });
+
+  const { parsed, commonTriple } = feeAnalyzeRegion(region, codesByLengthDesc, knownCodes);
+  console.log("[보수표] commonTriple:", commonTriple);
+  console.log("[보수표] 최종 파싱 결과:");
+  parsed.forEach(p => {
+    console.log("  ", p.code, p.kind, JSON.stringify(p.row), "자체triple=", p.tripleFromSelf);
+  });
+  console.log("[보수표] 현재 선택된 클래스코드(getResolvedClassCode):", getResolvedClassCode());
+  return { rows, parsed, commonTriple };
+}
+window.feeDebugDump = feeDebugDump;
 
 const FEE_RATE_FIELD_KEYS = ["totalFee", "saleFeeRate", "manageFeeRate", "trusteeFeeRate", "adminFeeRate"];
 function refreshFeeRateFields() {

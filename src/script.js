@@ -24,7 +24,9 @@ let items = [
   // 그래서 훨씬 덜 애매한 "N등급(...위험...)" 조합 패턴(예: "6등급(매우 낮은 위험)")을
   // leadPattern으로 먼저 시도하고, 못 찾을 때만 기존 키워드 방식으로 넘어감.
   { key:"risk_grade",   label:"투자위험등급",
-    leadPattern: "(\\d\\s*" + loosePattern("등급") + ")\\s*\\([^()]{0,20}" + loosePattern("위험") + "[^()]{0,20}\\)",
+    // 표지/요약정보의 실제 등급 표기는 소괄호가 아니라 대괄호인 문서가 많음
+    // (예: "3등급 [다소 높은 위험]") — 대괄호도 함께 인정하도록 함(2026-07-21).
+    leadPattern: "(\\d\\s*" + loosePattern("등급") + ")\\s*[\\(\\[][^()\\[\\]]{0,20}" + loosePattern("위험") + "[^()\\[\\]]{0,20}[\\)\\]]",
     keywords:expandKeywords(["투자위험등급","위험등급"]), valuePattern:"(\\d\\s?등급)", squeeze:true, value:"" },
 ];
 
@@ -36,6 +38,7 @@ let searchableText = "";     // 실제 항목 검색에 쓰는 텍스트 (표지
 let searchOffset = 0;        // searchableText가 fullText에서 시작하는 위치 (페이지 번호 계산 보정용)
 let summaryEntries = [];     // "1. 라벨 : 값" 형태의 요약 목록 (투자설명서 맨 앞부분에 흔히 있음)
 let pageBreaks = [];         // [{charIndex, pageNum}] — 투자설명서
+let classTablePages = [];    // [{pageNum, items:[{x,y,str,width}]}] — "펀드코드"+수수료유형(선취/후취/미징구/선후취) 표가 있는 페이지의 원본 글자 좌표 (좌표 기반 클래스표 파서용)
 
 // 신탁계약서(집합투자규약서)용 상태 — "영업일" 정의 조항 등 투자설명서엔 없는 내용을 별도로 파싱
 let trustDeedFullText = "";
@@ -113,6 +116,12 @@ if (dropzoneTrust && fileInputTrust) {
 
 // PDF 한 개를 열어서 페이지별 텍스트를 y좌표(줄)ㆍx좌표(칸) 순으로 재구성한 전체 텍스트로 반환.
 // 투자설명서/신탁계약서 둘 다 이 함수 하나로 처리한다 (진행률 표시 UI만 progressIds로 구분).
+//
+// 추가로, "펀드코드"+수수료유형 키워드가 함께 있는 페이지(=클래스 코드 표가 있는 페이지)는 글자별
+// 원본 좌표(x,y)도 함께 모아서 반환한다. 좌우 2열 표에서 한글 클래스 설명이 여러 줄로 줄바꿈될 때
+// 좌표 없이 순수 텍스트 줄만 갖고는(= 지금까지의 정규식 방식) 어떤 조합의 줄바꿈이든 다 커버하기가
+// 근본적으로 불가능해서, 클래스 표 페이지에 대해서만 좌표 기반 파서(extractClassTableGeometric)를
+// 쓸 수 있도록 원본 좌표를 별도로 보존해두는 것.
 async function extractPdfText(file, progressIds, onNumPages) {
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -121,6 +130,7 @@ async function extractPdfText(file, progressIds, onNumPages) {
 
   let textParts = [];
   const pageBreaksLocal = [];
+  const classTablePagesLocal = []; // [{ pageNum, items: [{x,y,str,width}] }]
   let runningLength = 0;
 
   for (let i = 1; i <= numPages; i++) {
@@ -160,6 +170,28 @@ async function extractPdfText(file, progressIds, onNumPages) {
       return line;
     }).join("\n");
 
+    // 클래스 코드 표가 있는 페이지인지 대략 판별 (정확한 판별은 좌표 파서 쪽에서 다시 함 —
+    // 여기선 "이 페이지 좌표를 보존해둘 가치가 있는가"만 저비용으로 걸러내는 용도).
+    // 예전엔 "(클래스)" 형태(= "종류(클래스)" 헤더) 문구가 있는지로만 좁혔는데, 운용사마다
+    // 헤더 표기가 달라서(예: 한화자산운용은 "집합투자기구 명칭(종류형 명칭)") 이 문구가 없는
+    // 문서는 클래스표가 있어도 통째로 걸러지지 않는 문제가 있었음(2026-07-21 발견).
+    // → 헤더 문구 대신, 클래스표라면 항상 있는 "구조적 특징"으로 판별: 같은 페이지에
+    //   "펀드코드"라는 단어와 "수수료선취/후취/미징구/선후취" 중 하나가 함께 등장하는가.
+    //   이 조합은 보수·비용 예시표(펀드코드 없음)나 용어정리 페이지(수수료 키워드 없음)에는
+    //   나타나지 않아서, 오검출 없이 더 넓은 문서를 잡아낼 수 있음. 좌표 파서(ctExtractPage)가
+    //   실제로 코드/설명을 나눌 때도 이 동일한 수수료 키워드에 의존하므로 기준을 통일한 셈.
+    const compactPageText = pageText.replace(/\s+/g, "");
+    const hasFeeTypeKeyword = ["수수료선후취", "수수료선취", "수수료후취", "수수료미징구"]
+      .some(kw => compactPageText.includes(kw));
+    if (compactPageText.includes("펀드코드") && hasFeeTypeKeyword) {
+      classTablePagesLocal.push({
+        pageNum: i,
+        items: content.items
+          .filter(it => it.str.trim())
+          .map(it => ({ x: it.transform[4], y: it.transform[5], str: it.str, width: it.width || it.str.length * 4 })),
+      });
+    }
+
     const tag = `\n\n[PAGE ${i}]\n\n`;
     pageBreaksLocal.push({ charIndex: runningLength, pageNum: i });
     textParts.push(tag + pageText);
@@ -170,7 +202,7 @@ async function extractPdfText(file, progressIds, onNumPages) {
     if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
   }
 
-  return { fullText: textParts.join(""), pageBreaks: pageBreaksLocal, numPages };
+  return { fullText: textParts.join(""), pageBreaks: pageBreaksLocal, numPages, classTablePages: classTablePagesLocal };
 }
 
 async function handleFile(file) {
@@ -186,13 +218,14 @@ async function handleFile(file) {
   $("#progressWrap").style.display = "block";
   setProgress(0, "PDF 여는 중…");
 
-  const { fullText: text, pageBreaks: pb } = await extractPdfText(
+  const { fullText: text, pageBreaks: pb, classTablePages: ctp } = await extractPdfText(
     file,
     { fillId: "progressFill", labelId: "progressLabel" },
     (numPages) => { $("#statPages").textContent = numPages; }
   );
   fullText = text;
   pageBreaks = pb;
+  classTablePages = ctp || [];
   $("#statChars").textContent = fullText.length.toLocaleString();
 
   // "이 투자설명서는 ~에 대한 자세한 내용을 담고 있습니다" 안내문구 위치를 찾아서,
@@ -406,8 +439,20 @@ function findSnippetForItem(item) {
   // leadPattern이 있는 항목은 "표준 안내문구" 등 전용 패턴을 최우선으로 시도
   // (여러 키워드 등장 위치를 헤매지 않고, 훨씬 신뢰도 높은 값을 바로 확정)
   if (item.leadPattern) {
-    const leadRe = new RegExp(item.leadPattern);
-    const leadMatch = searchableText.match(leadRe);
+    const leadRe = new RegExp(item.leadPattern, "g");
+    // 연혁(변경이력) 표에는 "1등급(매우 높은 위험) => 2등급(높은 위험)"처럼 과거 등급이
+    // 화살표로 이어진 채 나오는 경우가 있음 — 이런 매칭은 "현재 등급"이 아니라 "과거에 있었던
+    // 변경 기록"이므로, 매칭 바로 뒤(또는 앞)에 화살표(=>, ⇒, →)가 붙어있으면 건너뛰고
+    // 그 다음 매칭을 채택함(전체 문서에서 첫 매칭이 무조건 맞다고 가정하지 않음, 2026-07-21).
+    const ARROW_NEARBY_RE = /^\s*(?:=>|⇒|→)|(?:=>|⇒|→)\s*$/;
+    let leadMatch = null, m;
+    while ((m = leadRe.exec(searchableText)) !== null) {
+      const before = searchableText.slice(Math.max(0, m.index - 10), m.index);
+      const after = searchableText.slice(m.index + m[0].length, m.index + m[0].length + 10);
+      if (ARROW_NEARBY_RE.test(before) || ARROW_NEARBY_RE.test(after)) continue; // 변경이력의 일부로 보임 → 건너뜀
+      leadMatch = m;
+      break;
+    }
     if (leadMatch) {
       return {
         keyword: "(안내문구 패턴)",

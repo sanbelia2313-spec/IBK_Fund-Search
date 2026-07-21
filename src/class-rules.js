@@ -381,9 +381,12 @@ function parseClassDescription(desc) {
   let tier2 = "없음";
   if (raw.includes("온라인슈퍼")) tier2 = "온라인슈퍼";
   else if (raw.includes("온오프라인")) tier2 = "온오프라인";
+  // "온라인직접판매"/"오프라인직접판매"는 "온라인"/"오프라인" 문자열을 포함하고 있어서 아래
+  // "온라인"/"오프라인" 검사보다 먼저 걸러내야 함 (안 그러면 "직판"이 아니라 "온라인"/"오프라인"로
+  // 잘못 분류됨 — 표준 2차 옵션엔 "직판"만 있어서 채널구분 없이 매핑, 한화자산운용 J-e 등에서 확인됨)
+  else if (raw.includes("직접판매") || raw.includes("직판")) tier2 = "직판";
   else if (raw.includes("온라인")) tier2 = "온라인";
   else if (raw.includes("오프라인")) tier2 = "오프라인";
-  else if (raw.includes("직판")) tier2 = "직판";
 
   // 좀 더 구체적인 표현을 먼저 검사해야 함(예: "고액투자"/"고액1"/"고액2"가 "고액"에 먼저 걸려버리면 안 됨)
   let tier3 = "없음";
@@ -456,10 +459,176 @@ const CLASS_TABLE_RE_D = new RegExp(
   "g"
 );
 
+// ------------------------------------------------------------
+// 좌표 기반 클래스표 파서 (extractClassTableGeometric)
+// ------------------------------------------------------------
+// 기존 정규식 방식(형태 A/B/C/D)의 근본적인 한계: 좌우 2열로 나열된 클래스표에서 한글 설명이
+// 줄바꿈되는 "모양"이 문서마다 다양한데, 그 모양을 전부 정규식으로 미리 예측해서 등록해두는
+// 방식이라 새로운 줄바꿈 패턴이 나올 때마다 놓치는 클래스가 생김 (예: 설명 전체가 코드/펀드코드
+// 줄 앞뒤로 완전히 밀려나거나, 줄바꿈된 조각 안에 하이픈/쉼표가 끼는 경우 등).
+//
+// 이 파서는 텍스트가 아니라 PDF 글자 하나하나의 실제 좌표(x,y)를 직접 사용해서, 줄바꿈 "모양"을
+// 아예 예측하지 않고 다음 3가지 사실만으로 표를 재구성한다:
+//   1) 좌/우 두 열이 있다면 "펀드코드" 헤더가 2번 나오므로, 그 사이의 x간격이 가장 크게 벌어지는
+//      지점을 열 경계로 삼는다.
+//   2) 각 클래스의 "펀드코드"(예: C0553, DD222)는 항상 코드/설명과 같은 행(y)에 있고, 알파벳+숫자
+//      조합이라는 형태적 특징이 뚜렷해서 행의 "기준점(anchor)"으로 삼기에 안전하다.
+//   3) 코드와 설명이 여러 줄로 쪼개지더라도, 그 조각들은 항상 자기 행의 펀드코드 y와 가장 가깝다
+//      (다른 행의 펀드코드보다 멀리 떨어짐) — 그래서 "가장 가까운 펀드코드 행에 붙이기"만 하면
+//      몇 줄로 쪼개지든, 어떤 순서로 흩어지든 상관없이 원래 행으로 정확히 모인다.
+//   설명 조각과 코드 조각을 나눌 때도 "수수료선취/후취/미징구/선후취"라는 고정 키워드가 항상
+//   설명의 시작이라는 사실만 이용한다 (그 키워드가 시작되는 x보다 왼쪽에 있는 조각 = 코드).
+function ctGroupByY(items, tol) {
+  const sorted = items.slice().sort((a, b) => b.y - a.y);
+  const groups = [];
+  sorted.forEach(it => {
+    let g = groups.find(g => Math.abs(g.y - it.y) < tol);
+    if (!g) { g = { y: it.y, items: [] }; groups.push(g); }
+    g.items.push(it);
+  });
+  return groups;
+}
+
+function ctMergeLine(items) {
+  const sorted = items.slice().sort((a, b) => a.x - b.x);
+  let line = "", prevEnd = null;
+  sorted.forEach(p => {
+    if (prevEnd !== null) {
+      const gap = p.x - prevEnd;
+      if (gap > 8) line += "  ";
+      else if (gap > 1.5) line += " ";
+    }
+    line += p.str;
+    prevEnd = p.x + (p.width || p.str.length * 4);
+  });
+  return line.trim();
+}
+
+const CT_FEE_KEYWORDS = ["수수료선후취", "수수료선취", "수수료후취", "수수료미징구"];
+// 실제 클래스 코드로 보이는 형태(예: A, A-E, C-Pe, C-퇴직e, S-퇴직, S-고액1-2 등)만 인정.
+// 회사마다 코드 명명 규칙이 다를 수 있어서(하이픈 여러 개, 좀 더 긴 한글 접미사 등) 폭넓게
+// 허용하되, 표와 무관한 페이지(용어정리, 보수표 등)에서 우연히 걸린 조각은 보통 훨씬 길거나
+// "수수료"가 섞여있는 등 이 형태를 크게 벗어나므로 여기서 걸러진다.
+const CT_VALID_CODE_RE = /^[A-Za-z][A-Za-z0-9]{0,2}(?:-[A-Za-z가-힣0-9][A-Za-z가-힣0-9]{0,5}){0,2}(?:\([가-힣0-9]{1,10}\))?$/;
+
+function ctExtractColumn(colItems, fundHeaderX) {
+  // 1) 펀드코드로 보이는 행(y그룹) 찾기 — 펀드코드 헤더 x 근처, 영숫자 4~8자
+  const fundBandRaw = colItems.filter(it => Math.abs(it.x - fundHeaderX) < 40);
+  const fundGroups = ctGroupByY(fundBandRaw, 1.5)
+    .map(g => ({ y: g.y, text: ctMergeLine(g.items).replace(/\s+/g, "") }))
+    .filter(g => /^[A-Za-z0-9]{4,8}$/.test(g.text) && /[0-9]/.test(g.text));
+  if (fundGroups.length === 0) return [];
+
+  // 2) 행 간격(펀드코드 y들의 전형적인 간격)을 구해서, "이 조각이 어느 행에 속하는지" 판단할 반경을 정함
+  const rowYs = fundGroups.map(f => f.y).sort((a, b) => b - a);
+  const spacings = [];
+  for (let i = 1; i < rowYs.length; i++) spacings.push(rowYs[i - 1] - rowYs[i]);
+  const typicalSpacing = spacings.length
+    ? spacings.slice().sort((a, b) => a - b)[Math.floor(spacings.length / 2)]
+    : 34;
+  const maxRowDist = Math.max(typicalSpacing / 2 - 1, 10);
+
+  function nearestRow(y) {
+    let best = null, bestDist = Infinity;
+    fundGroups.forEach(f => {
+      const d = Math.abs(f.y - y);
+      if (d < bestDist) { bestDist = d; best = f; }
+    });
+    return bestDist <= maxRowDist ? best : null;
+  }
+
+  // 3) 펀드코드 자기 자신을 제외한 나머지 조각들 중, 어느 행에도 속하지 않는(= 표와 무관한 다른
+  //    본문 내용) 조각은 버림. 남은 조각만 그 행에 배정.
+  const fundItemIsSelf = it =>
+    Math.abs(it.x - fundHeaderX) < 40 && fundGroups.some(f => Math.abs(f.y - it.y) < 1.5);
+  const rows = fundGroups.map(f => ({ fundCode: f.text, y: f.y, items: [] }));
+  const rowByY = new Map(rows.map(r => [r.y, r]));
+
+  colItems.forEach(it => {
+    if (fundItemIsSelf(it)) return;
+    const nr = nearestRow(it.y);
+    if (nr) rowByY.get(nr.y).items.push(it);
+  });
+
+  // 4) 각 행 안에서, "수수료..." 키워드가 시작되는 x를 기준으로 그보다 왼쪽=코드, 오른쪽=설명으로 나눔
+  return rows.sort((a, b) => b.y - a.y).map(r => {
+    const feeItems = r.items.filter(it => {
+      const t = it.str.replace(/\s+/g, "");
+      return CT_FEE_KEYWORDS.some(k => t.startsWith(k));
+    });
+    const threshX = feeItems.length ? Math.min(...feeItems.map(it => it.x)) - 5 : Infinity;
+    const codeItems = r.items.filter(it => it.x < threshX);
+    const descItems = r.items.filter(it => it.x >= threshX);
+    let code = ctGroupByY(codeItems, 1.5).sort((a, b) => b.y - a.y)
+      .map(g => ctMergeLine(g.items)).join("").replace(/\s+/g, "");
+    let desc = ctGroupByY(descItems, 1.5).sort((a, b) => b.y - a.y)
+      .map(g => ctMergeLine(g.items)).join("").replace(/\s+/g, "");
+    // 코드가 별도의 칸으로 안 떨어져 있고("수수료미징구-오프라인-퇴직연금(RP(퇴직연금))"처럼
+    // 설명과 코드가 한 덩어리로 붙어있는 표 형식, 예: 한화자산운용) 경우 위 좌우분리로는
+    // codeItems가 통째로 비어버림. 이 경우 desc 끝의 마지막 괄호 그룹(중첩 1단계까지 허용)을
+    // 코드로 떼어내고, desc에서는 그 부분을 제거함.
+    if (!code) {
+      const trailingParen = desc.match(/\(([^()]*(?:\([^()]*\))?[^()]*)\)$/);
+      if (trailingParen) {
+        code = trailingParen[1];
+        desc = desc.slice(0, trailingParen.index);
+      }
+    }
+    return { code, desc, fundCode: r.fundCode };
+  }).filter(r => CT_VALID_CODE_RE.test(r.code)); // 코드 형태가 아닌 행(=표와 무관한 페이지의 오검출)은 제외
+}
+
+function ctExtractPage(pageItems) {
+  const headerItem = pageItems.find(it => it.str.includes("펀드코드"));
+  if (!headerItem) return [];
+
+  const headerBand = pageItems.filter(it => Math.abs(it.y - headerItem.y) < 20);
+  const headerXs = Array.from(new Set(headerBand.map(it => Math.round(it.x * 10) / 10))).sort((a, b) => a - b);
+  let colSplitX = null, maxHeaderGap = 0;
+  for (let i = 1; i < headerXs.length; i++) {
+    const gap = headerXs[i] - headerXs[i - 1];
+    if (gap > maxHeaderGap) { maxHeaderGap = gap; colSplitX = (headerXs[i] + headerXs[i - 1]) / 2; }
+  }
+
+  const fundHeaders = pageItems.filter(it => it.str.includes("펀드코드")).sort((a, b) => a.x - b.x);
+  const dataItems = pageItems.filter(it => it.y < headerItem.y - 5);
+
+  if (fundHeaders.length < 2 || colSplitX === null) {
+    // 1열짜리 클래스표
+    return ctExtractColumn(dataItems, fundHeaders[0].x);
+  }
+
+  const leftItems = dataItems.filter(it => it.x < colSplitX);
+  const rightItems = dataItems.filter(it => it.x >= colSplitX);
+  return ctExtractColumn(leftItems, fundHeaders[0].x).concat(ctExtractColumn(rightItems, fundHeaders[1].x));
+}
+
+// script.js가 채워두는 전역 classTablePages(= "종류(클래스)"+"펀드코드" 헤더가 있던 페이지들의
+// 원본 글자 좌표)를 사용해서 클래스표를 좌표 기반으로 재구성함. 여러 페이지에 걸쳐 같은 표가
+// 반복되는 경우(목차/본문 등)에도 페이지 순서대로 훑으며 처음 나온 코드를 채택.
+function extractClassTableGeometric() {
+  if (typeof classTablePages === "undefined" || !classTablePages || classTablePages.length === 0) return [];
+  const results = [];
+  const seenCodes = new Set();
+  classTablePages.forEach(page => {
+    let rows;
+    try { rows = ctExtractPage(page.items); } catch (e) { rows = []; }
+    rows.forEach(r => {
+      if (!r.code || seenCodes.has(r.code)) return;
+      seenCodes.add(r.code);
+      results.push({ code: r.code, ...parseClassDescription(r.desc) });
+    });
+  });
+  return results;
+}
+
 // PDF 원문(searchableText)에서 "종류(클래스)" 표를 직접 읽어 [{code, tier1, tier2, tier3}] 배열로 반환.
-// 두 가지 표 형태(A/B)를 모두 시도해서 합침. 아무것도 못 찾으면 빈 배열 반환
-// → 그럼 getActiveClassTable/detectClassCode가 하드코딩 표로 자동 대체함.
+// 1차: 좌표 기반 파서(extractClassTableGeometric) — 줄바꿈 모양과 무관하게 동작해서 훨씬 안정적.
+// 2차: 좌표 데이터가 없거나(폴백) 좌표 파서가 못 찾았을 때만 기존 정규식 방식(형태 A/B/C/D)으로 시도.
 function extractClassTableFromText(text) {
+  const geometric = extractClassTableGeometric();
+  if (geometric.length > 0) return geometric;
+
   if (!text) return [];
   const results = [];
   const seenCodes = new Set();

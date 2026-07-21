@@ -28,7 +28,12 @@ function cleanFundCharParagraph(str) {
 }
 
 // 요약정보: "투자전략" 헤딩(운용사에 따라 "(1) 투자전략" 또는 "가. 투자전략" 등으로 표기됨)
-// 바로 다음부터, 첫 "①" 소제목 또는 다음 소제목("나."/"(2)" 등, 즉 "위험관리" 헤딩) 직전까지
+// 바로 다음부터, 다음 것들 중 가장 먼저 나오는 지점 직전까지만 가져옴:
+//   - 첫 "①" 소제목
+//   - 다음 대등한 소제목("나." — 위험관리)
+//   - "비교지수" 언급 (예: "※ 비교지수: 나스닥 100 지수...") — 대부분 이 지점부터는
+//     투자전략 본문이 아니라 비교지수의 정의/선정사유/모투자신탁 투자전략 재인용 등
+//     부연설명으로 넘어가므로, 있으면 최우선으로 여기서 끊음.
 function findInvestStrategySummary(text) {
   if (!text) return null;
   // "(1)투자전략" / "1)투자전략" / "가.투자전략" 등 운용사별 표기를 모두 인식
@@ -39,7 +44,7 @@ function findInvestStrategySummary(text) {
   if (!m) return null;
   const start = m.index + m[0].length;
 
-  // 종료지점 후보: 첫 "①" 소제목, 또는 다음 대등한 소제목("나." — 위험관리)
+  // 종료지점 후보: 첫 "①" 소제목, 다음 대등한 소제목("나." — 위험관리), "비교지수" 언급
   const candidates = [];
   const circleIdx = text.indexOf("①", start);
   if (circleIdx !== -1) candidates.push(circleIdx);
@@ -47,6 +52,17 @@ function findInvestStrategySummary(text) {
   const searchWindow = text.slice(start, start + 3000); // 과도한 탐색 방지
   const nextHeadingMatch = searchWindow.match(/\n\s*나\s*\./);
   if (nextHeadingMatch) candidates.push(start + nextHeadingMatch.index);
+
+  const compareIdxMatch = searchWindow.match(new RegExp(loosePattern("비교지수")));
+  if (compareIdxMatch) {
+    let cutAt = start + compareIdxMatch.index;
+    // "※ 비교지수: ..." 처럼 표시 기호가 바로 앞에 붙는 경우가 많음 — 그 기호까지 함께 잘라내서
+    // 요약문 끝에 외따로 "※"만 남는 걸 방지
+    const before = text.slice(Math.max(0, cutAt - 15), cutAt);
+    const markerMatch = before.match(/※\s*$/);
+    if (markerMatch) cutAt -= markerMatch[0].length;
+    candidates.push(cutAt);
+  }
 
   const end = candidates.length ? Math.min(...candidates) : Math.min(start + 1500, text.length);
   if (end <= start) return null;
