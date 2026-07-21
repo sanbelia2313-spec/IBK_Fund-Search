@@ -225,6 +225,14 @@ async function handleFile(file) {
   runSafely(() => { if (typeof renderCommonInfo === "function") renderCommonInfo(); }, "상품공통정보 렌더링");
   runSafely(() => { if (typeof fcAutoExtract === "function") fcAutoExtract(); }, "펀드분류 자동추출");
   runSafely(() => { if (typeof renderFundClass === "function") renderFundClass(); }, "펀드분류 렌더링");
+
+  // 공공데이터포털(금융위원회_펀드상품기본정보) 조회로 설정일/펀드유형/협회표준코드/
+  // 상품분류코드(2차·11차분류) 보강. PDF기반 값이 이미 채워진 뒤 덮어쓰는 순서.
+  // 조회가 실패해도(네트워크 오류, 매칭 실패 등) 예외를 던지지 않으므로 이후 단계는 그대로 진행됨.
+  if (typeof publicApiAutoFill === "function" && typeof baseKrName !== "undefined" && baseKrName) {
+    await publicApiAutoFill(baseKrName);
+  }
+
   runSafely(() => { if (typeof refreshIndividualInfo === "function") refreshIndividualInfo(); }, "상품개별정보 자동계산");
   runSafely(() => { if (typeof fundCharAutoExtract === "function") fundCharAutoExtract(); }, "펀드특징(위험등급변경이력) 자동추출");
 }

@@ -6,7 +6,7 @@
 // 공식 "공공데이터 오픈API 활용가이드" 문서로 확인된 필드명 (추측 아님):
 //   setpDt    - 설정일 (YYYYMMDD)
 //   fndTp     - 펀드유형 (문자열, 예: "파생상품")
-//   prdClsfCd - 상품분류코드 (20자리) ← 2차분류/11차분류 자릿수 매핑 아직 미확정. 미반영.
+//   prdClsfCd - 상품분류코드 (20자리). 2차분류=2~3번째 자리, 11차분류=16~17번째 자리 — 둘 다 확인됨.
 //   asoStdCd  - 협회표준코드
 // 응답 경로: response.body.items.item (배열 또는 단일 객체)
 //
@@ -63,6 +63,7 @@ function parseSecondLevelClassification(prdClsfCd) {
 const FUND_TYPE_KNOWN_OPTIONS = [
   "주식혼합형", "채권혼합형", "특별자산투자", "주식형", "채권형",
   "MMF(개인)", "파생상품", "부동산투자", "MMF(법인)",
+  "주식고편입형", "주식저편입형", "채권투자형", "부동산투자형", "파생상품투자형",
 ];
 
 function pubApiFormatDate(yyyymmdd) {
@@ -71,8 +72,66 @@ function pubApiFormatDate(yyyymmdd) {
   return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
 }
 
-// likeFndNm(포함 검색)으로 조회 → 완전히 같은 펀드명이 있으면 그걸 채택,
-// 없으면 첫 결과를 채택 (클래스별로 여러 건이 잡힐 수 있어서).
+// 11차분류(투자대상자산 등) 2자리 값의 앞자리 → 5개 대카테고리.
+// (세부 서브카테고리(일반/가치주/성장주/배당주/섹터 등)까지는 필요 없고, 재간접(파생)형
+// 펀드의 펀드유형구분을 5개 카테고리 중 하나로 판정하는 데만 씀)
+const LV11_CATEGORY_BY_LEADING_DIGIT = {
+  "1": "주식고편입형",
+  "2": "주식저편입형",
+  "3": "채권투자형",
+  "4": "부동산투자형",
+  "5": "파생상품투자형",
+};
+
+// 11차분류(투자대상자산 등)는 20자리 중 16~17번째 자리(0-index 15~16)에 위치.
+// 앞자리 1~5면 5개 대카테고리 중 하나로 판정. "ZZ"(<기타-미분류>)도 11차분류표에 있는
+// 정상적인 값이지만, 지금 #fcType 드롭다운에는 그에 대응하는 옵션이 없어서(5개 카테고리만
+// 추가했음) 이 경우는 그냥 미판정으로 두고 로그만 남긴다. 필요해지면 "기타-미분류" 옵션을
+// 드롭다운에 추가하고 여기서 매핑해주면 됨.
+function parseEleventhLevelCategory(prdClsfCd) {
+  if (!prdClsfCd || prdClsfCd.length < 17) return null;
+  const code = prdClsfCd.slice(15, 17);
+  const category = LV11_CATEGORY_BY_LEADING_DIGIT[code[0]];
+  return category ? { code, category } : null;
+}
+
+// 2차분류가 재간접/재간접파생형(61/62)도 아니고 "OOO파생형"도 아닐 때,
+// 그 2차분류 값 자체를 펀드유형구분(#fcType) 표기로 바꾸는 매핑.
+// (51 투자계약증권, 91 혼합자산은 #fcType 드롭다운에 대응 옵션이 없어서 매핑 제외)
+const FUND_TYPE_BY_2ND_CODE = {
+  "11": "채권형",
+  "21": "주식형",
+  "31": "주식혼합형",
+  "41": "채권혼합형",
+  "71": "부동산투자",
+  "81": "특별자산투자",
+};
+
+// 펀드유형구분(#fcType) 결정 규칙 — 사용자 지정:
+//  1) 2차분류가 "OOO파생형"(끝자리가 2, 단 재간접파생형(62)은 예외) → "파생상품"
+//  2) 2차분류가 재간접형/재간접파생형(61/62) → 11차분류 카테고리 사용
+//  3) 그 외 → 2차분류에 대응하는 펀드유형구분 값 사용
+//     (2차분류가 EE(단기금융/MMF)면 개인/법인 구분이 2차분류만으론 안 되므로
+//      여기서 손대지 않고 null 반환 → 기존 PDF기반 로직이 채운 값을 그대로 둠)
+function determineFundType(prdClsfCd) {
+  if (!prdClsfCd || prdClsfCd.length < 3) return null;
+  const code2 = prdClsfCd.slice(1, 3);
+
+  if (code2 === "61" || code2 === "62") {
+    const lv11 = parseEleventhLevelCategory(prdClsfCd);
+    return lv11 ? lv11.category : null;
+  }
+  if (code2 === "EE") return null;
+  if (code2.endsWith("2")) return "파생상품"; // 채권/주식/혼합주식/혼합채권/투자계약증권/부동산/특별자산/혼합자산 각 "파생형"
+
+  return FUND_TYPE_BY_2ND_CODE[code2] || null;
+}
+
+// 같은 펀드도 클래스(A/C/C-W...)마다 별도 레코드로 나오고, fndNm 끝에 클래스명이
+// 붙어서 나오기 때문에 PDF에서 뽑은 펀드명과는 절대 완전일치하지 않는다.
+// → setpDt(설정일)가 가장 이른 레코드 하나를 대표로 삼아 그 레코드의 값을 그대로 쓴다.
+// (2차/11차분류, fndTp는 클래스 상관없이 동일하게 나오는 걸 실제 데이터로 확인함.
+//  협회표준코드만 클래스마다 다르지만, 이 부분은 신경 쓰지 않기로 함)
 async function fetchFundInfoByName(fundName) {
   if (!fundName) return null;
 
@@ -96,9 +155,11 @@ async function fetchFundInfoByName(fundName) {
   const rawItems = data?.response?.body?.items?.item;
   if (!rawItems) return null;
   const items = Array.isArray(rawItems) ? rawItems : [rawItems];
+  if (items.length === 0) return null;
 
-  const exact = items.find(it => it.fndNm === fundName);
-  return exact || items[0];
+  return items.reduce((earliest, cur) =>
+    (cur.setpDt && (!earliest.setpDt || cur.setpDt < earliest.setpDt)) ? cur : earliest
+  );
 }
 
 // item: fetchFundInfoByName()이 반환한 객체. 화면에 반영하고 어떤 항목을
@@ -137,18 +198,29 @@ function applyPublicApiFields(item) {
     }
   }
 
-  // 펀드유형 -> #fcType. 기존 드롭다운 옵션과 정확히 일치할 때만 검증 채택.
+  // 펀드유형구분 -> #fcType. 2차분류/11차분류 규칙(determineFundType)이 1순위,
+  // 규칙이 값을 못 내놓으면(EE=MMF 등) API의 fndTp가 드롭다운 옵션과 정확히 일치할 때만
+  // 보조로 채택 (그래도 안 맞으면 기존 PDF기반 로직이 채운 값을 그대로 둔다).
   const typeEl = $("#fcType");
-  if (typeEl && item.fndTp) {
-    if (FUND_TYPE_KNOWN_OPTIONS.includes(item.fndTp)) {
+  if (typeEl) {
+    const ruleBasedType = item.prdClsfCd ? determineFundType(item.prdClsfCd) : null;
+    if (ruleBasedType && FUND_TYPE_KNOWN_OPTIONS.includes(ruleBasedType)) {
+      typeEl.value = ruleBasedType;
+      typeEl.classList.remove("none-found");
+      typeEl.classList.add("auto-filled");
+      if (typeof FC_STATE !== "undefined") {
+        FC_STATE.fund_type = { value: ruleBasedType, found: true };
+      }
+      result.applied.push(`펀드유형(2차/11차분류 → ${ruleBasedType})`);
+    } else if (item.fndTp && FUND_TYPE_KNOWN_OPTIONS.includes(item.fndTp)) {
       typeEl.value = item.fndTp;
       typeEl.classList.remove("none-found");
       typeEl.classList.add("auto-filled");
       if (typeof FC_STATE !== "undefined") {
         FC_STATE.fund_type = { value: item.fndTp, found: true };
       }
-      result.applied.push("펀드유형");
-    } else {
+      result.applied.push("펀드유형(fndTp)");
+    } else if (item.fndTp) {
       result.skipped.push(`펀드유형: API값 "${item.fndTp}"이 드롭다운 옵션과 불일치 (수동 확인 필요)`);
     }
   }
@@ -193,7 +265,15 @@ function applyPublicApiFields(item) {
     }
   }
   if (item.prdClsfCd) {
-    result.skipped.push("11차분류 — 자릿수 위치 미확인, 미반영");
+    const code2 = item.prdClsfCd.slice(1, 3);
+    if ((code2 === "61" || code2 === "62") && !parseEleventhLevelCategory(item.prdClsfCd)) {
+      const code = item.prdClsfCd.slice(15, 17);
+      result.skipped.push(
+        code === "ZZ"
+          ? "재간접(형/파생형) 펀드인데 11차분류가 <기타-미분류>(ZZ)라서 펀드유형구분 5개 카테고리 중 하나로 판정할 수 없음 (정상적인 값, 수동 선택 필요)"
+          : `재간접(형/파생형) 펀드인데 11차분류 코드(${code})를 인식하지 못함`
+      );
+    }
   }
 
   return result;
