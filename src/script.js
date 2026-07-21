@@ -229,8 +229,11 @@ async function handleFile(file) {
   // 공공데이터포털(금융위원회_펀드상품기본정보) 조회로 설정일/펀드유형/협회표준코드/
   // 상품분류코드(2차·11차분류) 보강. PDF기반 값이 이미 채워진 뒤 덮어쓰는 순서.
   // 조회가 실패해도(네트워크 오류, 매칭 실패 등) 예외를 던지지 않으므로 이후 단계는 그대로 진행됨.
-  if (typeof publicApiAutoFill === "function" && typeof baseKrName !== "undefined" && baseKrName) {
-    await publicApiAutoFill(baseKrName);
+  // 공백이 다 지워진 baseKrName은 공공데이터 API 검색(likeFndNm)엔 안 맞으므로,
+  // 실제 띄어쓰기가 살아있는 baseKrNameRaw를 우선 쓴다.
+  const pubApiSearchName = (typeof baseKrNameRaw !== "undefined" && baseKrNameRaw) ? baseKrNameRaw : baseKrName;
+  if (typeof publicApiAutoFill === "function" && typeof baseKrName !== "undefined" && pubApiSearchName) {
+    await publicApiAutoFill(pubApiSearchName);
   }
 
   runSafely(() => { if (typeof refreshIndividualInfo === "function") refreshIndividualInfo(); }, "상품개별정보 자동계산");

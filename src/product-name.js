@@ -58,6 +58,9 @@ const classMatchHint = $("#classMatchHint");
 // 사용자가 클래스 규칙 확인 표에서 이 코드 저 코드 눌러봐도, 항상 이 원본 기준으로
 // 다시 이어붙이기 때문에 코드가 계속 누적되어 붙는 일이 없음.
 let baseKrName = "";
+// 공백이 다 지워지지 않은 "원본" 버전. 화면 표시(#krName)는 공백 없는 baseKrName을 쓰지만,
+// 외부 API 검색(공공데이터 등)처럼 실제 등록명의 띄어쓰기가 살아있어야 하는 곳에서 씀.
+let baseKrNameRaw = "";
 // 약칭펀드명도 마찬가지로 "클래스 코드 붙기 전" 원본을 저장해둠 (2026-07-15: 클래스 선택 시
 // 한글펀드명뿐 아니라 약칭펀드명에도 코드가 같이 표기되도록 함).
 let baseShortName = "";
@@ -149,6 +152,7 @@ function applyClassCodeSelection(entry) {
 function autoFillProductName() {
   // 매번 초기화: 이전 PDF의 값이 남아있지 않도록
   baseKrName = "";
+  baseKrNameRaw = "";
   baseShortName = "";
   pnFields.kr.value = "없음";
   pnFields.short.value = "없음";
@@ -172,8 +176,11 @@ function autoFillProductName() {
   if (m) {
     pnFields.kr.value = cleanFundName(m[1]);
     pnFields.kr.classList.add("auto-filled");
+    // 줄바꿈으로 쪼개진 공백만 하나로 합치고, 실제 띄어쓰기는 그대로 유지 (외부 API 검색용)
+    baseKrNameRaw = m[1].replace(/\s+/g, " ").trim();
   } else {
     pnFields.kr.classList.add("none-found");
+    baseKrNameRaw = "";
   }
 
   // 클래스 코드가 붙기 전 상태를 "원본"으로 저장 (없음이면 빈 문자열)

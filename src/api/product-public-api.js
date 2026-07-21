@@ -64,6 +64,7 @@ const FUND_TYPE_KNOWN_OPTIONS = [
   "주식혼합형", "채권혼합형", "특별자산투자", "주식형", "채권형",
   "MMF(개인)", "파생상품", "부동산투자", "MMF(법인)",
   "주식고편입형", "주식저편입형", "채권투자형", "부동산투자형", "파생상품투자형",
+  "기타-미분류",
 ];
 
 function pubApiFormatDate(yyyymmdd) {
@@ -84,13 +85,11 @@ const LV11_CATEGORY_BY_LEADING_DIGIT = {
 };
 
 // 11차분류(투자대상자산 등)는 20자리 중 16~17번째 자리(0-index 15~16)에 위치.
-// 앞자리 1~5면 5개 대카테고리 중 하나로 판정. "ZZ"(<기타-미분류>)도 11차분류표에 있는
-// 정상적인 값이지만, 지금 #fcType 드롭다운에는 그에 대응하는 옵션이 없어서(5개 카테고리만
-// 추가했음) 이 경우는 그냥 미판정으로 두고 로그만 남긴다. 필요해지면 "기타-미분류" 옵션을
-// 드롭다운에 추가하고 여기서 매핑해주면 됨.
+// 앞자리 1~5면 5개 대카테고리 중 하나로, "ZZ"면 <기타-미분류>로 판정한다.
 function parseEleventhLevelCategory(prdClsfCd) {
   if (!prdClsfCd || prdClsfCd.length < 17) return null;
   const code = prdClsfCd.slice(15, 17);
+  if (code === "ZZ") return { code, category: "기타-미분류" };
   const category = LV11_CATEGORY_BY_LEADING_DIGIT[code[0]];
   return category ? { code, category } : null;
 }
@@ -267,12 +266,7 @@ function applyPublicApiFields(item) {
   if (item.prdClsfCd) {
     const code2 = item.prdClsfCd.slice(1, 3);
     if ((code2 === "61" || code2 === "62") && !parseEleventhLevelCategory(item.prdClsfCd)) {
-      const code = item.prdClsfCd.slice(15, 17);
-      result.skipped.push(
-        code === "ZZ"
-          ? "재간접(형/파생형) 펀드인데 11차분류가 <기타-미분류>(ZZ)라서 펀드유형구분 5개 카테고리 중 하나로 판정할 수 없음 (정상적인 값, 수동 선택 필요)"
-          : `재간접(형/파생형) 펀드인데 11차분류 코드(${code})를 인식하지 못함`
-      );
+      result.skipped.push(`재간접(형/파생형) 펀드인데 11차분류 코드(${item.prdClsfCd.slice(15, 17)})를 인식하지 못함`);
     }
   }
 

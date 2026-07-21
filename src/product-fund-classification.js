@@ -505,11 +505,11 @@ function fcAutoExtract() {
   // 적정성원칙 대상여부:
   //   - 고난도상품여부가 "예"면 그대로 "예"
   //   - 고난도상품여부가 "아니오"면 파생투자여부(derivativeAnswer)에 따라 갈림
-  //       · 파생투자여부 "예"  → "비중확인필요" (파생 비중을 봐야 실제 대상 여부가 갈리므로)
+  //       · 파생투자여부 "예"  → "담당자확인필요" (파생 비중을 봐야 실제 대상 여부가 갈리므로)
   //       · 파생투자여부 "아니오" → "아니오"
   const suitability = highDifficulty === "예"
     ? "예"
-    : (derivativeAnswer === "예" ? "비중확인필요" : "아니오");
+    : (derivativeAnswer === "예" ? "담당자확인필요" : "아니오");
   fcSet("fund_suitability", suitability);
 
   // PB전용(PRIME)여부: 항상 아니오
