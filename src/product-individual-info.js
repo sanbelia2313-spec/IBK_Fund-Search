@@ -155,21 +155,124 @@ const FEE_TABLE_PRIMARY_ANCHORS = [
   "투자합자회사에 부과되는 보수 및 비용",
 ];
 const FEE_TABLE_FALLBACK_ANCHOR = "보수 및 수수료에 관한 사항";
-const FEE_TABLE_WINDOW = 6000;
+// O클래스(맨 마지막 행)까지 페이지 넘김을 포함해 다 들어오도록 여유있게 잡음
+// (6000자였던 걸로도 대부분 되긴 했지만, 아래 "공통값 한 번만 표기" 패턴을 잡으려면
+//  표 전체에서 최소 한 행이라도 온전히 파싱돼야 하므로 넉넉하게 늘려둠)
+const FEE_TABLE_WINDOW = 9000;
 
-// 열 인덱스 → 우리가 쓰는 필드 키 (null이면 관심없는 열: 기타비용/총보수·비용/동종유형총보수/증권거래비용)
-const FEE_TABLE_COLUMNS = [
-  "manageFeeRate",  // 0: 집합투자업자보수
-  "saleFeeRate",    // 1: 판매회사보수
-  "trusteeFeeRate", // 2: 신탁업자보수
-  "adminFeeRate",   // 3: 일반사무관리회사보수
-  "totalFee",       // 4: 투자신탁총보수 (※ "총보수·비용"과 다른 열 — 절대 혼동 금지)
-  null,             // 5: 기타비용
-  null,             // 6: 총보수·비용
-  null,             // 7: 동종유형총보수
-  "syntheticFee",   // 8: 합성총보수·비용
-  null,             // 9: 증권거래비용
-];
+// 표준 10칸 열 순서(모든 클래스마다 값이 다 적혀있는 문서용):
+//   [집합투자업자보수, 판매회사보수, 신탁업자보수, 일반사무관리보수, 총보수,
+//    기타비용, 총보수·비용, 동종유형총보수, 합성총보수·비용, 증권거래비용]
+// "간략 7칸" 열 순서(집합투자업자·신탁업자·일반사무관리보수 3칸이 전 클래스 공통이라
+//  표에서 통째로 빠지고 판매회사보수부터 시작하는 문서용):
+//   [판매회사보수, 총보수, 기타비용, 총보수·비용, 동종유형총보수, 합성총보수·비용, 증권거래비용]
+//
+// 실제 투자설명서는 이 둘 중 하나로 나오는데, 어느 쪽인지 문서마다 다르고 같은 문서 안에서도
+// "공통값이 어느 행에 끼어서 나오는지"가 랜덤이라(우리가 검증한 예시에서는 중간의 무권유저비용
+// 클래스 행에 끼어 나왔음), 행 하나를 콕 찍어 파싱하는 대신 표 전체를 훑어서:
+//  1) 어떤 식으로든 "운용사+신탁업자+일반사무관리+판매사 보수의 합 = 총보수"가 맞아떨어지는
+//     행을 찾아 그 행에서 집합투자업자/신탁업자/일반사무관리보수(공통값)를 확정하고,
+//  2) 그 공통값을 표의 모든 행(판매사보수·총보수만 갖고 있는 축약행 포함)에 동일하게 적용한다.
+// → 표기 방식이 어느 쪽이든(매 칸 반복형이든 공통값 병합형이든) 같은 로직으로 처리 가능.
+
+function feeToNum(raw) {
+  if (raw === undefined || raw === null) return NaN;
+  if (/^[-－–]+$/.test(raw)) return NaN;
+  const n = parseFloat(String(raw).replace(/[^0-9.]/g, ""));
+  return Number.isNaN(n) ? NaN : n;
+}
+function feeToDisplay(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (/^[-－–]+$/.test(raw)) return undefined;
+  const cleaned = String(raw).replace(/[^0-9.]/g, "");
+  return cleaned ? cleaned + "%" : undefined;
+}
+
+// 해석1) "표준 10칸" 그대로: tokens[0..4]=운용/판매/수탁/사무관리/총보수, tokens[8]=합성총보수.
+// 자체 검증(운용+판매+수탁+사무관리 ≈ 총보수)까지 통과해야 이 해석을 채택한다.
+function feeTryFull(tokens) {
+  if (tokens.length < 5) return null;
+  const manage = feeToNum(tokens[0]), sale = feeToNum(tokens[1]);
+  const trustee = feeToNum(tokens[2]), admin = feeToNum(tokens[3]);
+  const total = feeToNum(tokens[4]);
+  if ([manage, sale, trustee, admin, total].some(Number.isNaN)) return null;
+  const consistent = Math.abs((manage + sale + trustee + admin) - total) < 0.02;
+  return {
+    consistent,
+    triple: { manage: tokens[0], trustee: tokens[2], admin: tokens[3] },
+    row: { sale: tokens[1], total: tokens[4], synthetic: tokens[8] },
+  };
+}
+
+// 해석2) "간략 N칸"(운용/신탁/사무관리보수 3칸이 공통이라 이 행엔 아예 없는 서식):
+// tokens[0]=판매사보수, tokens[1]=총보수, tokens[5]=합성총보수. 공통값(triple)은 별도로 채워야 함.
+function feeTryReduced(tokens) {
+  if (tokens.length < 2) return null;
+  const sale = feeToNum(tokens[0]), total = feeToNum(tokens[1]);
+  if ([sale, total].some(Number.isNaN)) return null;
+  return { row: { sale: tokens[0], total: tokens[1], synthetic: tokens[5] } };
+}
+
+// region 전체를 훑어서: 클래스별 행(sale/total/synthetic)과, 표 안에 공통값이 끼어있다면
+// 그 공통 운용사/신탁업자/일반사무관리보수(triple)를 함께 뽑아낸다.
+//
+// "표준 10칸으로 볼지, 공통값이 낀 간략행으로 볼지"는 그 행 하나의 산술검증(합계=총보수)만으론
+// 구분이 안 된다 — 어느 쪽으로 읽어도 "앞 4칸의 합 = 5번째 칸"이라는 같은 식이 되기 때문에
+// (라벨만 다르게 붙을 뿐 더하는 숫자 자체는 동일). 그래서 행 하나가 아니라 표 전체를 보고,
+// "이 표에서 제일 흔한 토큰 개수(다수결)"로 서식을 먼저 정한다:
+//  - 다수가 짧은(7~8칸) 간략행이면 → 그보다 정확히 3칸 더 긴 행이 "공통값이 낀 행"
+//  - 다수가 긴(9칸 이상) 표준행이면 → 매 행에 다 적힌 것이므로 그대로 표준 매핑 사용
+function feeAnalyzeRegion(region, codesByLengthDesc, knownCodes) {
+  const rows = buildFeeTableRows(region, knownCodes);
+  const candidateRows = [];
+  for (const r of rows) {
+    if (r.tokens.length < 2) continue;
+    const code = extractRowCodeFromLabelLine(r.label) ||
+      (isCodeLikeToken(r.label) ? r.label : null) ||
+      extractTrailingKnownCode(r.label, codesByLengthDesc);
+    if (code) candidateRows.push({ code, tokens: r.tokens });
+  }
+  if (!candidateRows.length) return { parsed: [], commonTriple: null };
+
+  const lengthCounts = {};
+  candidateRows.forEach(r => { lengthCounts[r.tokens.length] = (lengthCounts[r.tokens.length] || 0) + 1; });
+  const modeLength = Number(Object.keys(lengthCounts).sort((a, b) => lengthCounts[b] - lengthCounts[a])[0]);
+  const isReducedDominant = modeLength <= 8; // 7~8칸=간략형 다수, 9칸 이상=표준(매 행 반복)형 다수
+
+  const parsed = [];
+  let commonTriple = null;
+
+  if (isReducedDominant) {
+    for (const r of candidateRows) {
+      const extra = r.tokens.length - modeLength;
+      if (extra === 3) {
+        // 앞 3칸을 공통값으로 떼어내고, 나머지를 그 행 고유의 간략 데이터로 다시 해석
+        const triple = { manage: r.tokens[0], trustee: r.tokens[1], admin: r.tokens[2] };
+        const own = feeTryReduced(r.tokens.slice(3));
+        if (own) {
+          const m = feeToNum(triple.manage), t = feeToNum(triple.trustee), a = feeToNum(triple.admin);
+          const s = feeToNum(own.row.sale), tot = feeToNum(own.row.total);
+          const consistent = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
+          if (consistent && !commonTriple) commonTriple = triple;
+          parsed.push({ code: r.code, kind: "embedded", row: own.row, tripleFromSelf: consistent ? triple : null });
+          continue;
+        }
+      }
+      const reduced = feeTryReduced(r.tokens);
+      if (reduced) parsed.push({ code: r.code, kind: "reduced", row: reduced.row, tripleFromSelf: null });
+    }
+  } else {
+    // 표준(매 행 반복)형: 행마다 이미 운용/판매/수탁/사무관리보수가 다 적혀있으니 그대로 사용.
+    for (const r of candidateRows) {
+      const full = feeTryFull(r.tokens);
+      if (full) {
+        parsed.push({ code: r.code, kind: full.consistent ? "full" : "full-unverified", row: full.row, tripleFromSelf: full.triple });
+      }
+    }
+  }
+
+  return { parsed, commonTriple };
+}
 
 function findFeeTableRegion() {
   if (typeof searchableText === "undefined" || !searchableText) return null;
@@ -303,56 +406,14 @@ function extractTrailingKnownCode(label, codesByLengthDesc) {
   return null;
 }
 
-// region 안에서 targetCode(예: "C-P2")에 해당하는 표의 데이터 행을 찾아, 숫자/대시 토큰들을 반환.
-// 라벨은 보통 "...(코드)" 형태로 끝나지만(투자설명서 보수표), 코드만 단독으로 라벨이 되는
-// 예전 형식(신탁계약서류)도 있어 그 경우는 라벨 전체가 코드처럼 보이는지로 한번 더 시도함.
+// targetCode(예: "C-P2")에 해당하는, feeAnalyzeRegion이 이미 분류해둔 항목을 찾아 반환.
 // CODE_ALIAS(예: "W" ↔ "CW")로 매핑되는 표기 차이도 함께 시도함.
-function findFeeTableRowTokens(region, targetCode) {
-  if (!region || !targetCode) return null;
+function findParsedFeeEntry(parsed, targetCode) {
+  if (!parsed || !targetCode) return null;
   const rawKey = normalizeCodeKey(targetCode);
   const aliasedKey = CODE_ALIAS[rawKey] || rawKey;
   const candidateKeys = new Set([rawKey, aliasedKey]);
-  // 현재(감지된) 회사의 실제 코드 목록 — 코드 단독 라벨 서식에서 행 시작을 인식하고,
-  // 헤더 텍스트가 앞에 붙은 라벨에서도 실제 코드를 뽑아내기 위해 필요함.
-  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
-  const knownCodes = new Set(activeCodes.map(c => normalizeCodeKey(c)));
-  const codesByLengthDesc = activeCodes.slice().sort((a, b) => b.length - a.length);
-  const rows = buildFeeTableRows(region, knownCodes);
-
-  for (const row of rows) {
-    if (row.tokens.length < 5) continue; // 운용/판매/수탁/사무관리/총보수 최소 5개는 있어야 유효한 행
-    const rowCode = extractRowCodeFromLabelLine(row.label) ||
-      (isCodeLikeToken(row.label) ? row.label : null) ||
-      extractTrailingKnownCode(row.label, codesByLengthDesc);
-    if (rowCode && candidateKeys.has(normalizeCodeKey(rowCode))) {
-      return row.tokens;
-    }
-  }
-  return null;
-}
-
-function mapFeeRowToValues(tokens) {
-  const result = {};
-  FEE_TABLE_COLUMNS.forEach((key, i) => {
-    if (!key) return;
-    const raw = tokens[i];
-    if (raw === undefined) return;
-    if (/^[-－–]+$/.test(raw)) return; // 대시(해당없음)는 스킵
-    const num = raw.replace(/[^0-9.]/g, "");
-    if (num) result[key] = num + "%";
-  });
-  return result;
-}
-
-// 운용사+판매사+수탁사+사무관리사 보수 합 ≈ 투자신탁총보수인지로 자체 검증
-// (표 열 순서 가정이 이 문서에도 맞아떨어지는지 확인하는 용도)
-function feeValuesPlausible(values) {
-  const keys = ["manageFeeRate", "saleFeeRate", "trusteeFeeRate", "adminFeeRate"];
-  const nums = keys.map(k => values[k] !== undefined ? parseFloat(values[k]) : NaN);
-  if (nums.some(isNaN) || values.totalFee === undefined) return false;
-  const sum = nums.reduce((a, b) => a + b, 0);
-  const total = parseFloat(values.totalFee);
-  return Math.abs(sum - total) < 0.02;
+  return parsed.find(p => candidateKeys.has(normalizeCodeKey(p.code))) || null;
 }
 
 function computeFeeTableValues() {
@@ -360,30 +421,36 @@ function computeFeeTableValues() {
   if (!region) return null;
   const resolvedCode = getResolvedClassCode();
   if (!resolvedCode) return null;
-  const tokens = findFeeTableRowTokens(region, resolvedCode);
-  if (!tokens) return null;
-  const values = mapFeeRowToValues(tokens);
 
-  // 총보수(=투자신탁총보수)는 "총보수·비용"(기타비용까지 합친 값)과 혼동되기 아주 쉬움.
-  // 그래서 고정된 열 위치를 그대로 믿는 대신, "운용사+판매사+수탁사+사무관리사 보수의 합"이라는
-  // 정의 자체로 다시 확인한다 — 이 행의 숫자 토큰들 중 그 합계와 정확히 일치하는 값을 총보수로
-  // 채택함. "총보수·비용"은 여기에 기타비용이 더해진 값이라 기타비용이 0이 아닌 한 합계와 달라서
-  // 절대 잘못 골라지지 않음.
-  const coreKeys = ["manageFeeRate", "saleFeeRate", "trusteeFeeRate", "adminFeeRate"];
-  const coreVals = coreKeys.map(k => values[k] !== undefined ? parseFloat(values[k]) : NaN);
-  if (!coreVals.some(isNaN)) {
-    const coreSum = coreVals.reduce((a, b) => a + b, 0);
-    for (const raw of tokens) {
-      if (/^[-－–]+$/.test(raw)) continue;
-      const num = parseFloat(raw.replace(/[^0-9.]/g, ""));
-      if (!isNaN(num) && Math.abs(num - coreSum) < 0.001) {
-        values.totalFee = raw.replace(/[^0-9.]/g, "") + "%";
-        break;
-      }
-    }
+  // 현재(감지된) 회사의 실제 코드 목록 — 코드 단독 라벨 서식에서 행 시작을 인식하고,
+  // 헤더 텍스트가 앞에 붙은 라벨에서도 실제 코드를 뽑아내기 위해 필요함.
+  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
+  const knownCodes = new Set(activeCodes.map(c => normalizeCodeKey(c)));
+  const codesByLengthDesc = activeCodes.slice().sort((a, b) => b.length - a.length);
+
+  const { parsed, commonTriple } = feeAnalyzeRegion(region, codesByLengthDesc, knownCodes);
+  const entry = findParsedFeeEntry(parsed, resolvedCode);
+  if (!entry) return null;
+
+  const values = {};
+  if (entry.row.sale !== undefined) values.saleFeeRate = feeToDisplay(entry.row.sale);
+  if (entry.row.total !== undefined) values.totalFee = feeToDisplay(entry.row.total);
+  if (entry.row.synthetic !== undefined) values.syntheticFee = feeToDisplay(entry.row.synthetic);
+
+  // 운용사/신탁업자/일반사무관리보수: 이 행 자체에 값이 있으면(표준 10칸/공통값이 이 행에 낀
+  // 경우) 그 값을 그대로 쓰고, 없으면(간략 7칸 행) 표 전체에서 검증된 공통값으로 채운다.
+  const triple = entry.tripleFromSelf || commonTriple;
+  let confident = false;
+  if (triple) {
+    values.manageFeeRate = feeToDisplay(triple.manage);
+    values.trusteeFeeRate = feeToDisplay(triple.trustee);
+    values.adminFeeRate = feeToDisplay(triple.admin);
+    const m = feeToNum(triple.manage), t = feeToNum(triple.trustee), a = feeToNum(triple.admin);
+    const s = feeToNum(entry.row.sale), tot = feeToNum(entry.row.total);
+    confident = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
   }
 
-  return { values, confident: feeValuesPlausible(values) };
+  return { values, confident };
 }
 
 const FEE_RATE_FIELD_KEYS = ["totalFee", "saleFeeRate", "manageFeeRate", "trusteeFeeRate", "adminFeeRate"];
