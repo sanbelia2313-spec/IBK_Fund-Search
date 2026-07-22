@@ -1004,7 +1004,9 @@ function nameContains(keyword) {
 }
 
 // 개인/개인사업자/법인 개설가능 — 펀드명에 "개인"+MMF, "법인"+MMF 조합을 최우선으로 보고,
-// 그다음 CW(ISA) 클래스, 나머지는 일반펀드 기본값. 아직 기준이 없으면 미입력으로 둠.
+// 그다음 CW(ISA) 클래스, 그다음 연금클래스(3차명에 "연금" 포함, isCpFamilyClass())는 개인만 개설
+// 가능하므로 개인사업자/법인은 무조건 "아니오"로 고정. 나머지는 일반펀드 기본값. 아직 기준이 없으면
+// 미입력으로 둠.
 function refreshAccountTypeOpenability() {
   if (!hasProductBasis()) {
     [piFields.openIndiv, piFields.openBizIndiv, piFields.openCorp].forEach(clearSelectField);
@@ -1018,6 +1020,8 @@ function refreshAccountTypeOpenability() {
     indiv = "아니오"; bizIndiv = "아니오"; corp = "예";
   } else if (isCwClass()) {
     indiv = "예"; bizIndiv = "아니오"; corp = "예";
+  } else if (isCpFamilyClass()) {
+    indiv = "예"; bizIndiv = "아니오"; corp = "아니오";
   }
   [[piFields.openIndiv, indiv], [piFields.openBizIndiv, bizIndiv], [piFields.openCorp, corp]].forEach(([el, val]) => {
     if (!el) return;
@@ -1038,7 +1042,7 @@ const SPECIAL_FLAGS_TABLE = {
              separateTaxation:"예", nonResident:"아니오", overseasListedTaxExempt:"아니오",
              professionalOnly:"아니오", cleanClass:"아니오", recommendedFundType:"해당무" },
   cp:      { livelihood:"아니오", taxBenefit:"아니오", specialEarlyTermination:"예",
-             separateTaxation:"아니오", nonResident:"아니오", overseasListedTaxExempt:"아니오",
+             separateTaxation:"예", nonResident:"아니오", overseasListedTaxExempt:"아니오",
              professionalOnly:"아니오", cleanClass:"아니오", recommendedFundType:"해당무" },
 };
 const SPECIAL_FLAG_KEYS = [

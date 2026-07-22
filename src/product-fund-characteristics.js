@@ -23,6 +23,11 @@ function cleanFundCharParagraph(str) {
   let s = str.replace(/\[PAGE\s*\d+\]/g, " ");
   s = s.replace(/\n\s*-?\s*\d{1,4}\s*-?\s*\n/g, " "); // 단독 쪽번호 줄 제거
   s = s.replace(/\s+/g, " ").trim();
+  // "결정됩니\n다." 처럼 "~습니다/됩니다/합니다" 등이 PDF에서 줄바꿈으로 "니"와 "다."로 쪼개졌던 경우,
+  // 위 공백 정리 과정에서 줄바꿈이 그냥 공백 하나로 바뀌어 "니 다."처럼 어색하게 떨어져 보이게 됨.
+  // 원래 한 단어였던 것이므로 다시 붙여줌. ("니"+공백+"다." 조합은 자연스러운 한국어 문장에서 거의
+  // 나오지 않으므로 오탐 위험은 낮음)
+  s = s.replace(/니\s+다\./g, "니다.");
   s = s.replace(/\s*(?=(?:\d{1,2}\)|①|②|③|④|⑤|⑥|※))/g, "\n").trim();
   // "- 이 투자신탁은 ~~~. - 이 투자신탁은 ~~~." 처럼 이어지는 "- 문장" 글머리 기호(bullet)들을
   // 한 줄에 다 붙여서 보여주면 눈에 잘 안 들어오므로, 문장 중간의 "- " 글머리 기호 앞에서 문단을 나눔.
@@ -123,7 +128,7 @@ function findInvestStrategySummary(text) {
 }
 
 // 이익손실발생구조: "나. 수익구조:" 또는 "다. 수익구조:" (운용사별 표기 차이) 문단 전체
-// (다음 대분류 번호소제목, [ ]괄호헤딩, 또는 다음 가./나./다. 소제목 전까지, 최대 1200자)
+// (다음 대분류 번호소제목, [ ]괄호헤딩, 또는 다음 가./나./다. 소제목 전까지, 최대 3000자)
 function findProfitLossStructure(text) {
   if (!text) return null;
   const anchorRe = new RegExp(
@@ -137,11 +142,32 @@ function findProfitLossStructure(text) {
   const colonIdx = nearby.search(/[:：]/);
   if (colonIdx !== -1) start += colonIdx + 1;
 
-  const windowText = text.slice(start, start + 1200);
-  // 다음 대분류 번호 소제목(예: "\n10. 집합투자기구의 투자위험"), "[...]" 괄호헤딩,
-  // 또는 다음 가./나./다. 소제목이 나오면 그 전까지만
-  const nextHeading = windowText.match(/\n\s*(?:\d{1,2}\s*\.\s*[가-힣]|\[|가\s*\.|나\s*\.|다\s*\.)/);
-  const end = nextHeading ? nextHeading.index : windowText.length;
+  const windowText = text.slice(start, start + 3000); // 과도한 탐색 방지
+  const candidates = [];
+
+  // 다음 대분류 번호 소제목(예: "\n10. 집합투자기구의 투자위험")
+  const numberedMatch = windowText.match(/\n\s*\d{1,2}\s*\.\s*[가-힣]/);
+  if (numberedMatch) candidates.push(numberedMatch.index);
+
+  // "[...]" 괄호헤딩
+  const bracketMatch = windowText.match(/\n\s*\[/);
+  if (bracketMatch) candidates.push(bracketMatch.index);
+
+  // 다음 가./나./다. 소제목. 단, 한국어 문장은 거의 전부 "~습니다."처럼 "다."로 끝나기 때문에, PDF에서
+  // 줄이 재구성될 때 이 마지막 "다."가 우연히 새 줄의 맨 앞에 오면(예: "결정됩니\n다.") 소제목으로
+  // 오인되어 문단이 진짜 끝나기 직전(마지막 "다."가 잘려나간 채)에서 잘리는 문제가 있었음. 그래서
+  // "다." 바로 앞 글자가 "니"이면("습니다"/"됩니다"/"합니다" 등이 줄바꿈으로 쪼개진 것) 소제목이 아니라
+  // 문장의 자연스러운 끝으로 보고 후보에서 제외함(2026-07-22, 실제 오탐 사례로 확인).
+  const letterRe = /\n\s*(가|나|다)\s*\./g;
+  let letterMatch;
+  while ((letterMatch = letterRe.exec(windowText)) !== null) {
+    const before = windowText.slice(Math.max(0, letterMatch.index - 3), letterMatch.index);
+    if (letterMatch[1] === "다" && /니\s*$/.test(before)) continue; // "~니다." 오탐 제외
+    candidates.push(letterMatch.index);
+    break; // 첫 유효 매칭만 종료 지점 후보로 사용
+  }
+
+  const end = candidates.length ? Math.min(...candidates) : windowText.length;
   const cleaned = cleanFundCharParagraph(windowText.slice(0, end));
   return cleaned || null;
 }
