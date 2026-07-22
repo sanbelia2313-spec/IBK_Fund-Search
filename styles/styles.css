@@ -558,6 +558,10 @@ main > section:nth-of-type(3) > #individualInfoForm{
   font-weight:700;
   color:var(--brand);
 }
+#checkTable .check-fundcode{
+  font-family:var(--mono);
+  color:var(--ink-soft);
+}
 #checkTable .check-empty{
   padding:14px 10px;
   color:var(--ink-soft);

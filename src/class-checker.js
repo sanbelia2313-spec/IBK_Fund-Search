@@ -37,12 +37,13 @@ function renderClassCheckTable(company, selectedCode, overrideTable) {
       <td>${escapeHtml(r.tier1)}</td>
       <td>${escapeHtml(r.tier2)}</td>
       <td>${escapeHtml(r.tier3)}</td>
+      <td class="check-fundcode">${escapeHtml(r.fundCode || "-")}</td>
     </tr>
   `).join("");
 
   table.innerHTML = `
     <thead>
-      <tr><th>코드</th><th>1차</th><th>2차</th><th>3차</th></tr>
+      <tr><th>코드</th><th>1차</th><th>2차</th><th>3차</th><th>펀드코드</th></tr>
     </thead>
     <tbody>${rows}</tbody>
   `;
@@ -61,12 +62,28 @@ function renderClassCheckTable(company, selectedCode, overrideTable) {
 }
 
 const checkCompanySelect = $("#checkCompany");
+const CURRENT_PDF_OPTION_DEFAULT_LABEL = "현재 PDF에서 추출한 표";
+
+// checkCompanySelect의 "현재 PDF에서 추출한 표" 가상 옵션은 값(value)은 그대로 CURRENT_PDF_TABLE_KEY로
+// 두되, 화면에 보이는 글자(label)만 실제 감지된 운용사명으로 바꿔줌(2026-07-22 추가) — 회사가
+// CLASS_CODE_MAP_BY_COMPANY에 등록돼 있지 않아도(=하드코딩 규칙이 없어도) 그 회사 이름 자체는
+// PDF에서 뽑혔을 수 있으므로, "현재 PDF에서 추출한 표"라는 무의미한 문구 대신 실제 회사명을
+// 보여주는 게 사용자에게 더 유용함. label이 없으면(회사명도 못 찾았으면) 기본 문구로 되돌림.
+// 값(value)이 그대로 CURRENT_PDF_TABLE_KEY라서 기존 로직(overrideTable 등)은 전혀 안 건드림.
+function updateCurrentPdfOptionLabel(label) {
+  if (!checkCompanySelect) return;
+  const opt = Array.from(checkCompanySelect.options || []).find(o => o.value === CURRENT_PDF_TABLE_KEY);
+  if (!opt) return;
+  opt.textContent = label ? `${label}` : CURRENT_PDF_OPTION_DEFAULT_LABEL;
+}
+window.updateCurrentPdfOptionLabel = updateCurrentPdfOptionLabel;
+
 if (checkCompanySelect) {
   const companies = Object.keys(CLASS_CODE_MAP_BY_COMPANY);
   // 맨 위에 "현재 PDF에서 추출" 가상 옵션을 추가 — PDF 업로드 후 선택하면 하드코딩 표 대신
   // 지금 문서에서 직접 뽑은 클래스 표를 바로 보여줌
   checkCompanySelect.innerHTML =
-    `<option value="${escapeHtml(CURRENT_PDF_TABLE_KEY)}">현재 PDF에서 추출한 표</option>` +
+    `<option value="${escapeHtml(CURRENT_PDF_TABLE_KEY)}">${escapeHtml(CURRENT_PDF_OPTION_DEFAULT_LABEL)}</option>` +
     companies.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 
   checkCompanySelect.addEventListener("change", () => renderClassCheckTable(checkCompanySelect.value));

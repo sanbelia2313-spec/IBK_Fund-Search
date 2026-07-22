@@ -281,6 +281,19 @@ function autoFillProductName() {
   // 드롭박스에 보여줄 값: 운용사를 알아냈으면 항상 그 회사 이름을 보여줌(원래 동작대로).
   // 운용사를 못 알아냈을 때만 "현재 PDF에서 추출한 표" 가상 옵션을 보여줌.
   const dropdownValue = companyKey || CURRENT_PDF_TABLE_KEY;
+
+  // companyKey가 없어도(=CLASS_CODE_MAP_BY_COMPANY에 등록 안 된 회사라도) PDF에서 "집합투자업자"
+  // 이름 자체는 이미 추출돼 있을 수 있음(script.js가 이 함수보다 먼저 관련 항목을 채워둠) — 있으면
+  // "현재 PDF에서 추출한 표"라는 문구 대신 실제 회사명을 그 옵션에 표시함(2026-07-22 추가).
+  if (typeof updateCurrentPdfOptionLabel === "function") {
+    let detectedManagerName = "";
+    if (!companyKey && typeof items !== "undefined") {
+      const managerItem = items.find(i => i.key === "manager");
+      if (managerItem && managerItem.value && managerItem.value !== "없음") detectedManagerName = managerItem.value;
+    }
+    updateCurrentPdfOptionLabel(detectedManagerName || null);
+  }
+
   if (typeof checkCompanySelect !== "undefined" && checkCompanySelect) {
     checkCompanySelect.value = dropdownValue;
   }

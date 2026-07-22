@@ -255,6 +255,12 @@ async function handleFile(file) {
   searchableText = fullText.slice(searchOffset);
   summaryEntries = extractSummaryEntries(searchableText);
 
+  // 요약정보/이익손실발생구조는 searchableText만 있으면 바로 뽑을 수 있고 다른 단계(운용사·
+  // 클래스·공공데이터 API 등)에 의존하지 않으므로, 최대한 먼저 실행해서 화면에 빨리 채워지게 함.
+  // (2026-07-22: 예전엔 이 호출이 맨 마지막, 특히 공공데이터 API 네트워크 조회보다도 뒤에 있어서
+  //  아무 관련도 없는 그 응답을 기다린 다음에야 채워지는 문제가 있었음)
+  runSafely(() => { if (typeof fundCharAutoExtract === "function") fundCharAutoExtract(); }, "펀드특징(위험등급변경이력) 자동추출");
+
   // 운용사(집합투자업자)를 먼저 추출해둬야, 상품명 폼의 클래스 코드 매칭이
   // "전체 회사 통합 검사"가 아니라 해당 운용사 규칙으로 정확하게 이뤄짐
   runSafely(() => {
@@ -299,7 +305,6 @@ async function handleFile(file) {
   }
 
   runSafely(() => { if (typeof refreshIndividualInfo === "function") refreshIndividualInfo(); }, "상품개별정보 자동계산");
-  runSafely(() => { if (typeof fundCharAutoExtract === "function") fundCharAutoExtract(); }, "펀드특징(위험등급변경이력) 자동추출");
 }
 
 // 자동추출 단계 하나를 실행하되, 예외가 나도 콘솔에만 남기고 이후 단계는 계속 진행되게 함.
