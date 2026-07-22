@@ -470,11 +470,27 @@ function extractTrailingKnownCode(label, codesByLengthDesc) {
 
 // targetCode(예: "C-P2")에 해당하는, feeAnalyzeRegion이 이미 분류해둔 항목을 찾아 반환.
 // CODE_ALIAS(예: "W" ↔ "CW")로 매핑되는 표기 차이도 함께 시도함.
+// ⚠️ (2026-07-22 추가) extractRowCodeFromLabelLine()은 보수표의 "(RP(퇴직연금))"류 라벨에서
+// 중첩된 괄호를 부가설명으로 보고 일부러 버려서 코드를 "RP"로만 뽑는다(그래야 "(C4(장마))"
+// 같은 다른 회사 서식에서 코드가 "C4"로 올바르게 뽑힘). 그런데 클래스표(class-rules.js) 쪽은
+// 반대로 이 괄호를 코드의 일부로 취급해서 "RP(퇴직연금)", "S-P(연금저축)" 형태를 그대로 코드로
+// 쓴다(한화자산운용에서 실제 확인). 그래서 둘이 서로 다른 문자열이 되어 매칭이 실패하고, 해당
+// 클래스들(RP, RPe, S-P, S-RP, J-Pe, J-RPe 등 연금/퇴직연금 클래스 전부)의 보수율이 하나도
+// 채워지지 않는 문제가 있었음. 정확히 일치하는 게 없으면, targetCode 끝의 "(...)" 부가설명을
+// 떼어낸 짧은 버전으로 한 번 더 시도한다 — 추출 로직 자체는 그대로 두고 조회만 관대하게 만듦.
 function findParsedFeeEntry(parsed, targetCode) {
   if (!parsed || !targetCode) return null;
   const rawKey = normalizeCodeKey(targetCode);
   const aliasedKey = CODE_ALIAS[rawKey] || rawKey;
   const candidateKeys = new Set([rawKey, aliasedKey]);
+
+  const strippedCode = targetCode.replace(/\([^()]*\)\s*$/, "");
+  if (strippedCode && strippedCode !== targetCode) {
+    const strippedKey = normalizeCodeKey(strippedCode);
+    candidateKeys.add(strippedKey);
+    candidateKeys.add(CODE_ALIAS[strippedKey] || strippedKey);
+  }
+
   return parsed.find(p => candidateKeys.has(normalizeCodeKey(p.code))) || null;
 }
 
