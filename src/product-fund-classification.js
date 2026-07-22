@@ -78,17 +78,54 @@ function fcProductName() {
 }
 
 // 회사명 후보 문자열(raw) 안에 옵션 목록 중 어떤 이름이 들어있는지 찾는다.
-// "(주)"/"㈜"/공백 차이는 무시하고 비교하며, 여러 개 걸리면 더 긴(더 구체적인) 이름을 우선한다.
+// "(주)"/"㈜"/공백 차이는 무시하고 비교한다.
 // 회사명이 "KB"처럼 영문 약칭으로 등록되어 있어도 투자설명서에는 "케이비"처럼 한글 발음으로
 // 표기되는 경우가 있어(예: KB펀드파트너스 → 케이비펀드파트너스) 그 표기 차이도 동일하게 취급한다.
+// ⚠️ (2026-07-22 수정, 2차) 처음엔 "가장 긴(더 구체적인) 이름"을 우선했는데, "일반사무관리회사
+// 변경: 신한펀드파트너스㈜에서 하나펀드서비스㈜로 변경" 같은 변경 이력 문구가 같은 탐색
+// 윈도우에 있을 때 옛 이름이 더 길다는 이유만으로 잘못 뽑혔음(한화글로벌헬스케어 펀드로 확인).
+// 그래서 "텍스트에서 더 먼저 등장하는 이름"으로 바꿨었으나, 이 역시 근본적으로 불안정함 —
+// 문서 포맷에 따라 "OO에서 **로 변경되었습니다" 같은 이력 문구가 "회사명" 라벨보다 *먼저* 나올
+// 수도 있고, 그러면 위치 기준으로도 옛 회사명(OO)이 먼저 나와서 똑같이 잘못 뽑히게 됨.
+// → 위치가 아니라 "OO에서 **(으)로 변경"이라는 문구 구조 자체를 직접 인식해서, 그 문구 안에서는
+// "~로" 뒤쪽(변경 후=최신)을 "~에서" 앞쪽(변경 전=과거)보다 항상 우선한다. 이 문구가 아예 없는
+// 경우에만(변경 이력이 없는 문서) 텍스트에서 더 먼저 등장하는 이름을 쓴다.
 function fcMatchOption(rawText, options) {
   if (!rawText) return null;
   const norm = s => s.replace(/\(주\)|㈜|\s+/g, "").replace(/케이비/g, "KB").toUpperCase();
   const normalizedRaw = norm(rawText);
-  let best = null;
+
+  // "~에서 ... (으)로 변경" 구간 안에 등장하는 옵션은 "변경 전(from)"/"변경 후(to)"로 나눠
+  // 각각 다른 가중치를 준다. 변경 전 쪽은 아예 후보에서 배제하고, 변경 후 쪽을 최우선으로 삼는다.
+  const demoted = new Set(); // 변경 전(옛 이름)으로 확인된 옵션 — 배제
+  const promoted = new Set(); // 변경 후(최신 이름)로 확인된 옵션 — 최우선
+  const changeRe = /(.{0,40}?)에서(.{0,40}?)(?:으)?로\s*변경/g;
+  let cm;
+  while ((cm = changeRe.exec(rawText)) !== null) {
+    const fromPart = norm(cm[1]);
+    const toPart = norm(cm[2]);
+    for (const opt of options) {
+      const normOpt = norm(opt);
+      if (toPart.includes(normOpt)) promoted.add(opt);
+      else if (fromPart.includes(normOpt)) demoted.add(opt);
+    }
+  }
+
+  let best = null, bestIndex = Infinity;
   for (const opt of options) {
-    if (normalizedRaw.includes(norm(opt))) {
-      if (!best || opt.length > best.length) best = opt;
+    if (demoted.has(opt) && !promoted.has(opt)) continue; // 변경 전 이름은 배제
+    const normOpt = norm(opt);
+    const idx = normalizedRaw.indexOf(normOpt);
+    if (idx === -1) continue;
+    const isPromoted = promoted.has(opt);
+    const bestIsPromoted = best ? promoted.has(best) : false;
+    if (isPromoted && !bestIsPromoted) {
+      best = opt; bestIndex = idx; continue; // 변경 후 이름이 확인되면 무조건 우선
+    }
+    if (!isPromoted && bestIsPromoted) continue; // 이미 변경 후 이름을 찾았으면 유지
+    if (idx < bestIndex || (idx === bestIndex && (!best || opt.length > best.length))) {
+      best = opt;
+      bestIndex = idx;
     }
   }
   return best;
