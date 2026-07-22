@@ -375,7 +375,7 @@ function parseClassDescription(desc) {
   // 매트릭스형 표(ctExtractMatrixPage)에서 열 경계가 살짝 겹쳐서, 바로 옆 클래스의 글자 1개가
   // "미징"과 "구" 사이에 잘못 끼어드는 경우가 실제로 관찰됨(예: "수수료미징)구", "수수료미징보구").
   // "수수료미징구"는 항상 붙어있는 고정 문구라서, 그 사이에 뭔가 끼어있으면 100% 노이즈로 보고 제거.
-  raw = raw.replace(/수수료미징.?구/, "수수료미징구");
+  raw = raw.replace(/수수료미징.{0,2}구/, "수수료미징구");
 
   let tier1 = "없음";
   if (raw.includes("수수료선후취")) tier1 = "수수료선후취";
@@ -674,12 +674,16 @@ function ctExtractMatrixPage(pageItems) {
     const cols = ctBuildColumnsFromHeader(hg);
     if (cols.length < 3) return;
 
-    // 열 간격의 절반을 "같은 열로 인정할 최대 x거리"로 사용(행 기반 파서와 동일한 방식)
+    // 열 간격의 절반을 "같은 열로 인정할 최대 x거리"로 삼되, 조금 더 여유를 둠(+4pt).
+    // 3차 태그(예: "-랩", "-펀드 등", "-개인연금")처럼 설명이 길어지는 클래스는 줄바꿈을 거치며
+    // 원래 열 anchor에서 20pt 넘게 벌어지는 경우가 실제로 있어서(2026-07-22, KCGI로 확인),
+    // 너무 타이트하게 자르면 그 글자가 통째로 버려져 3차 분류가 틀어짐. parseClassDescription의
+    // 정규화/완화 규칙과 같이 맞춰서 실측상 이 정도가 최적이었음.
     const xs = cols.map(c => c.x).sort((a, b) => a - b);
     const gaps = [];
     for (let i = 1; i < xs.length; i++) gaps.push(xs[i] - xs[i - 1]);
     const typicalGap = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : 40;
-    const maxColDist = Math.max(typicalGap / 2 - 2, 15);
+    const maxColDist = Math.max(typicalGap / 2 + 4, 15);
 
     // 스캔범위 상한: 다음 헤더블록이 있으면 그 y까지, 없으면(마지막 블록) 일단 넉넉하게 잡아두고
     // 아래에서 실제 펀드코드 행을 찾는 즉시 멈춰서 표 밖 본문이 섞이지 않게 함.

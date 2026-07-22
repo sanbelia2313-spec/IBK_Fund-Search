@@ -65,6 +65,31 @@ let baseKrNameRaw = "";
 // 한글펀드명뿐 아니라 약칭펀드명에도 코드가 같이 표기되도록 함).
 let baseShortName = "";
 
+// "클래스 규칙 확인" 표에서 코드를 직접 클릭해 확정한(또는 PDF에 코드가 정확히 1개만 있어서
+// 자동으로 확정된) "정확한 코드"를 따로 기억해둠 (2026-07-22 추가).
+//
+// 왜 필요한가: 1~3차 드롭다운만으로는 실제 코드를 특정하지 못하는 경우가 실제로 있음
+// (예: KCGI의 A와 A1은 수수료구분·판매경로·3차특성이 전부 동일해서 1~3차만 보면 구분이 안 됨.
+//  C1~C4도 마찬가지로 전부 "수수료미징구-오프라인-보수체감"으로 동일함). 이런 경우도 사용자가
+// 표에서 "A1"을 직접 클릭하면 그 순간엔 정확한 코드를 알고 있으므로, 그 값을 여기 기억해두고
+// getResolvedClassCode()/getCurrentClassEntry()가 1~3차 재매칭보다 이 값을 우선 사용하게 함.
+// 단, 사용자가 이후 1~3차 드롭다운을 "직접" 바꾸면(클릭이 아니라 드롭다운 조작) 이 핀은 더 이상
+// 유효하지 않을 수 있으므로 그 즉시 비움 — 실제 사용 시점(getPinnedClassCode)에도 지금
+// 1~3차 값과 여전히 일치하는지 다시 확인하므로 이중으로 안전함.
+let pinnedClassCode = null;
+
+// 지금 pinnedClassCode가 있고, 그 코드가 지금 활성 클래스표에서 지금 1~3차 드롭다운 값과
+// 정확히 일치하면 그 코드를 반환. 아니면(핀이 없거나, 드롭다운이 바뀌어 더 이상 안 맞으면) null.
+function getPinnedClassCode() {
+  if (!pinnedClassCode) return null;
+  const table = getActiveClassTable();
+  const t1 = pnFields.class1.value, t2 = pnFields.class2.value, t3 = pnFields.class3.value;
+  const entry = table.find(e => e.code === pinnedClassCode);
+  if (!entry) return null;
+  if (entry.tier1 !== t1 || entry.tier2 !== t2 || entry.tier3 !== t3) return null;
+  return pinnedClassCode;
+}
+
 function refreshClassDependentOptions() {
   const table = getActiveClassTable();
   const companyKey = getDetectedCompanyKey();
@@ -103,9 +128,9 @@ function refreshClassDependentOptions() {
   }
 }
 
-pnFields.class1.addEventListener("change", () => { refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
-pnFields.class2.addEventListener("change", () => { refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
-pnFields.class3.addEventListener("change", () => { refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
+pnFields.class1.addEventListener("change", () => { pinnedClassCode = null; refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
+pnFields.class2.addEventListener("change", () => { pinnedClassCode = null; refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
+pnFields.class3.addEventListener("change", () => { pinnedClassCode = null; refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
 
 // 지금 1~3차 드롭다운 조합에 해당하는 클래스표 행을 찾아 반환 (fundCode 포함 — product-public-api.js의
 // applyKofiaCodeForCurrentClass가 이 fundCode로 협회표준코드를 다시 찾아 넣는 데 씀).
@@ -116,6 +141,11 @@ function getCurrentClassEntry() {
   const table = getActiveClassTable();
   const t1 = pnFields.class1.value, t2 = pnFields.class2.value, t3 = pnFields.class3.value;
   if (!t1 || t1 === "없음") return null;
+
+  // 핀(직접 클릭해 확정한 정확한 코드)이 지금도 유효하면 최우선으로 그걸 씀 — A/A1처럼
+  // 1~3차 조합만으로는 여러 코드가 동시에 들어맞는 경우도 정확히 구분됨.
+  const pinned = getPinnedClassCode();
+  if (pinned) return table.find(e => e.code === pinned) || null;
 
   // "없음"은 2차/3차에서 "아직 선택 안 함"(와일드카드) 의미로도 쓰이지만, 동시에 일부 코드는
   // 실제로 tier3="없음"을 갖고 있음(예: KB자산운용 "C"는 tier3=없음). 그래서 먼저 지금 선택된
@@ -144,6 +174,8 @@ function refreshKofiaCodeForCurrentClass() {
 //    붙어있던 다른 코드가 있었다면 원본 기준으로 다시 계산하므로 코드가 누적되지 않음)
 // 3) sms발송용펀드명은 그렇게 갱신된 약칭펀드명을 기준으로 다시 20바이트 잘라 생성함.
 function applyClassCodeSelection(entry) {
+  pinnedClassCode = entry.code;
+
   // 드롭다운에 원하는 값이 없는 상태(좁혀진 옵션)일 수 있으니, 먼저 전체 옵션으로 열어둔 뒤 값을 넣음
   fillSelect(pnFields.class2, CLASS2_OPTIONS);
   fillSelect(pnFields.class3, CLASS3_OPTIONS);
@@ -189,6 +221,7 @@ function autoFillProductName() {
   baseKrName = "";
   baseKrNameRaw = "";
   baseShortName = "";
+  pinnedClassCode = null;
   pnFields.kr.value = "없음";
   pnFields.short.value = "없음";
   pnFields.sms.value = "없음";

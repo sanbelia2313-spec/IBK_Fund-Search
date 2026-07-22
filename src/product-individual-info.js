@@ -101,6 +101,13 @@ function normalizeToStandardClass(rawCode) {
 function getResolvedClassCode() {
   if (!pnFields.class1.value || pnFields.class1.value === "없음") return "";
   const table = getActiveClassTable();
+
+  // 핀(클래스 규칙 확인 표에서 직접 클릭했거나, PDF에 코드가 정확히 1개뿐이라 자동 확정된
+  // 정확한 코드)이 지금도 유효하면 최우선으로 사용 — 1~3차 조합만으로 여러 코드가 동시에
+  // 들어맞는 경우(예: KCGI의 A/A1, C1~C4)도 정확히 구분됨 (2026-07-22 추가, product-name.js).
+  const pinned = (typeof getPinnedClassCode === "function") ? getPinnedClassCode() : null;
+  if (pinned) return pinned;
+
   const t1 = pnFields.class1.value, t2 = pnFields.class2.value, t3 = pnFields.class3.value;
 
   const exactMatch = table.filter(e => e.tier1 === t1 && e.tier2 === t2 && e.tier3 === t3);
@@ -471,15 +478,240 @@ function findParsedFeeEntry(parsed, targetCode) {
   return parsed.find(p => candidateKeys.has(normalizeCodeKey(p.code))) || null;
 }
 
+// ---------------------------------------------
+// 매트릭스형 보수표 파서 (2026-07-22 추가, KCGI 등)
+// ---------------------------------------------
+// 위 buildFeeTableRows/feeAnalyzeRegion은 "클래스 하나당 한 행"에 보수 수치들이 가로로 나열되는
+// 표를 전제로 한다. 그런데 class-rules.js의 클래스표와 마찬가지로, 일부 운용사는 보수표도
+// "클래스를 가로로 늘어놓고 보수종류를 세로로 쌓는" 매트릭스형으로 만든다(예: KCGI). 이 경우
+// 클래스별 수치가 전부 다른 x(열)에 있고, 보수종류(집합투자업자보수/판매회사보수/...)가 y(행)를
+// 공유한다 — 그래서 텍스트 순서가 아니라 좌표(x,y)로 재구성해야 한다.
+//
+// feeTablePages(script.js가 "판매회사보수" 문구가 있는 페이지마다 보존해둔 원본 좌표)를 이용해서,
+// 클래스 코드 헤더행(예: "A Ae C1 C2 ...")을 찾고, 그 아래에서 알려진 보수종류 라벨
+// (FEE_MATRIX_LABEL_SEQUENCE)이 순서대로 등장하는 지점의 y를 기준으로 각 행의 데이터 구간을
+// 잘라 클래스별 값을 뽑는다. 클래스 수가 많으면 표가 여러 블록(페이지)에 걸쳐 나뉠 수 있어서,
+// 블록마다 다음 블록이 시작되는 지점을 넘어가지 않도록 경계를 둔다.
+function fmGroupByY(items, tol) {
+  const sorted = items.slice().sort((a, b) => b.y - a.y);
+  const groups = [];
+  sorted.forEach(it => {
+    let g = groups.find(g => Math.abs(g.y - it.y) < tol);
+    if (!g) { g = { y: it.y, items: [] }; groups.push(g); }
+    g.items.push(it);
+  });
+  return groups;
+}
+
+// 작은 x간격(기본 8pt 미만)으로 붙어있는 조각들을 하나의 "칸" 텍스트로 합침.
+// "C" + "-" + "P2"처럼 복합코드가 여러 아이템으로 쪼개져 나오는 경우를 한 칸으로 모으기 위함.
+function fmMergeCells(items, gap) {
+  const sorted = items.slice().sort((a, b) => a.x - b.x);
+  const cells = [];
+  let cur = null;
+  sorted.forEach(it => {
+    const w = it.width || it.str.length * 4;
+    if (cur && (it.x - cur.endX) < gap) {
+      cur.text += it.str;
+      cur.endX = it.x + w;
+    } else {
+      if (cur) cells.push(cur);
+      cur = { x: it.x, text: it.str, endX: it.x + w };
+    }
+  });
+  if (cur) cells.push(cur);
+  return cells;
+}
+
+// 페이지 안에서 "알려진 클래스 코드가 3개 이상 같은 줄에 나열된" 헤더행을 전부 찾음.
+function fmFindHeaderGroups(pageItems, knownCodesSet) {
+  const groups = fmGroupByY(pageItems, 2);
+  const out = [];
+  groups.forEach(g => {
+    const cells = fmMergeCells(g.items, 8);
+    const matches = cells.filter(c => knownCodesSet.has(normalizeCodeKey(c.text)));
+    if (matches.length >= 3) out.push({ y: g.y, cols: matches.map(c => ({ x: c.x, code: c.text })) });
+  });
+  return out;
+}
+
+// 보수표 행 라벨을 등장 순서대로 나열(투자설명서 표준 서식 순서와 동일).
+// text는 stripForFeeLabel()로 정규화한 뒤 비교할 값 — 공백/줄바꿈/가운뎃점(·, ㆍ)/괄호 등은
+// 전부 제거하고 순수 한글/영숫자만 남긴 형태로 적어둠.
+const FEE_MATRIX_LABEL_SEQUENCE = [
+  { key: "manage", text: "집합투자업자보수" },
+  { key: "sale", text: "판매회사보수" },
+  { key: "trustee", text: "신탁회사보수" },
+  { key: "admin", text: "일반사무관리회사보수" },
+  { key: "total", text: "총보수" },
+  { key: "other", text: "기타비용" },
+  { key: "totalWithCost", text: "총보수비용" },
+  { key: "peer", text: "동종유형총보수" },
+  { key: "synthetic", text: "총보수비용피투자집합투자기구보수포함" },
+  { key: "brokerage", text: "증권거래비용" },
+];
+// 실제 UI 필드로 옮길 필요가 있는 항목만 (나머지는 위치 파악용으로만 씀)
+const FEE_MATRIX_NEEDED_KEYS = new Set(["manage", "sale", "trustee", "admin", "total", "synthetic"]);
+
+// PDF마다 "·"(U+00B7)와 "ㆍ"(U+318D, 한글 호환 자모라 유니코드 Hangul 스크립트로 분류됨)가
+// 뒤섞여 나오는 경우가 있어서(2026-07-22, KCGI로 확인: "총보수·비용"과 "총보수ㆍ비용(피투자...)"
+// 에 서로 다른 가운뎃점 문자가 쓰임), 둘 다 명시적으로 먼저 제거하고 나머지 비한글/비영숫자
+// 문자를 지움.
+function stripForFeeLabel(s) {
+  return s.replace(/[·ㆍ]/g, "").replace(/[^\p{Script=Hangul}A-Za-z0-9]/gu, "");
+}
+
+// 헤더블록 하나(여러 페이지에 걸칠 수 있음)를 파싱해서 { code: {manage,sale,trustee,admin,total,synthetic} }로 반환.
+// hardStop이 있으면(다음 헤더블록의 시작점) 그 지점을 절대 넘어가지 않음 — 블록끼리 섞이는 것 방지.
+function fmExtractBlock(headerInfo, pageList, startPageIdx, hardStop) {
+  const cols = headerInfo.cols;
+  const firstColX = Math.min(...cols.map(c => c.x));
+  const lastColX = Math.max(...cols.map(c => c.x));
+  const xs = cols.map(c => c.x).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < xs.length; i++) gaps.push(xs[i] - xs[i - 1]);
+  const typicalGap = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : 40;
+  const maxColDist = Math.max(typicalGap / 2 + 4, 15);
+
+  const leftItemsFlat = [];
+  const dataItemsFlat = [];
+  let stopped = false;
+
+  for (let pi = startPageIdx; pi < pageList.length && !stopped; pi++) {
+    const items = pageList[pi].items;
+    const startY = (pi === startPageIdx) ? headerInfo.y - 0.5 : Infinity;
+    const sortedItems = items.filter(it => it.y < startY).sort((a, b) => b.y - a.y || a.x - b.x);
+    for (const it of sortedItems) {
+      if (hardStop && (pi > hardStop.pageIdx || (pi === hardStop.pageIdx && it.y <= hardStop.y + 3))) {
+        stopped = true; break;
+      }
+      if (it.x < firstColX - 15) leftItemsFlat.push({ text: it.str, y: it.y, pageIdx: pi });
+      else if (it.x <= lastColX + 25) dataItemsFlat.push({ x: it.x, y: it.y, str: it.str, pageIdx: pi });
+
+      // 표의 마지막 행(증권거래비용)까지 라벨을 다 모았으면 그 즉시 멈춤(합성총보수까지는 이미 확보됨)
+      const concatSoFar = stripForFeeLabel(leftItemsFlat.map(l => l.text).join(""));
+      if (concatSoFar.includes(stripForFeeLabel("증권거래비용"))) { stopped = true; break; }
+    }
+  }
+
+  let bigStr = "";
+  const itemOffsets = [];
+  leftItemsFlat.forEach(l => {
+    const t = stripForFeeLabel(l.text);
+    itemOffsets.push({ start: bigStr.length, end: bigStr.length + t.length, y: l.y, pageIdx: l.pageIdx });
+    bigStr += t;
+  });
+  function yAtOffset(off) {
+    const hit = itemOffsets.find(o => off >= o.start && off < o.end) || itemOffsets[itemOffsets.length - 1];
+    return hit ? { y: hit.y, pageIdx: hit.pageIdx } : null;
+  }
+
+  let searchFrom = 0;
+  const boundaries = [];
+  for (const lbl of FEE_MATRIX_LABEL_SEQUENCE) {
+    const idx = bigStr.indexOf(lbl.text, searchFrom);
+    if (idx === -1) { boundaries.push(null); continue; }
+    const pos = yAtOffset(idx);
+    boundaries.push({ key: lbl.key, y: pos.y, pageIdx: pos.pageIdx });
+    searchFrom = idx + lbl.text.length;
+  }
+
+  const rowsByKey = {};
+  for (let i = 0; i < boundaries.length; i++) {
+    const b = boundaries[i];
+    if (!b || !FEE_MATRIX_NEEDED_KEYS.has(b.key)) continue;
+    let next = null;
+    for (let j = i + 1; j < boundaries.length; j++) { if (boundaries[j]) { next = boundaries[j]; break; } }
+    const inRange = (d) => {
+      if (d.pageIdx < b.pageIdx) return false;
+      if (d.pageIdx === b.pageIdx && d.y > b.y + 3) return false;
+      if (next) {
+        if (d.pageIdx > next.pageIdx) return false;
+        if (d.pageIdx === next.pageIdx && d.y <= next.y + 3) return false;
+      }
+      return true;
+    };
+    const perCol = new Map();
+    dataItemsFlat.filter(inRange).forEach(it => {
+      let best = null, bestDist = Infinity;
+      cols.forEach(c => { const dd = Math.abs(c.x - it.x); if (dd < bestDist) { bestDist = dd; best = c; } });
+      if (!best || bestDist > maxColDist) return;
+      if (!perCol.has(best.code)) perCol.set(best.code, []);
+      perCol.get(best.code).push(it);
+    });
+    const values = {};
+    perCol.forEach((arr, code) => {
+      const sorted = arr.slice().sort((a, b) => b.y - a.y || a.x - b.x);
+      // "주6)" 같은 각주 표시가 셀 값에 그대로 붙어있는 경우(예: Ae/Ce의 판매보수 각주),
+      // 각주 번호가 숫자에 섞여 "0.2250" → "0.22506"처럼 오염되는 걸 막기 위해 먼저 제거.
+      values[code] = sorted.map(x => x.str).join("").replace(/주\d*\)/g, "");
+    });
+    rowsByKey[b.key] = values;
+  }
+
+  const perCode = {};
+  cols.forEach(c => { perCode[c.code] = {}; });
+  Object.entries(rowsByKey).forEach(([key, values]) => {
+    Object.entries(values).forEach(([code, v]) => { if (perCode[code]) perCode[code][key] = v; });
+  });
+  return perCode;
+}
+
+// feeTablePages 전체를 훑어서 { code: {manage,sale,trustee,admin,total,synthetic} } 형태로 반환.
+// 매트릭스형 표가 아니면(헤더블록을 하나도 못 찾으면) null.
+function extractFeeMatrixTable(knownCodes) {
+  if (typeof feeTablePages === "undefined" || !feeTablePages || feeTablePages.length === 0) return null;
+  const knownCodesSet = new Set(knownCodes.map(normalizeCodeKey));
+
+  const pageList = feeTablePages;
+  const allHeaders = [];
+  pageList.forEach((p, idx) => {
+    fmFindHeaderGroups(p.items, knownCodesSet).forEach(h => allHeaders.push({ ...h, pageIdx: idx }));
+  });
+  if (allHeaders.length === 0) return null;
+
+  const merged = {};
+  allHeaders.forEach((h, hi) => {
+    const nextHeader = allHeaders[hi + 1] || null;
+    const perCode = fmExtractBlock(h, pageList, h.pageIdx, nextHeader);
+    Object.assign(merged, perCode);
+  });
+  return merged;
+}
+
 function computeFeeTableValues() {
-  const region = findFeeTableRegion();
-  if (!region) return null;
   const resolvedCode = getResolvedClassCode();
   if (!resolvedCode) return null;
 
+  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
+
+  // 1차: 매트릭스형(클래스 가로배치) 보수표 시도 — 뽑히면 이걸 우선 사용.
+  const matrixTable = extractFeeMatrixTable(activeCodes);
+  if (matrixTable) {
+    const matrixKey = Object.keys(matrixTable).find(c => normalizeCodeKey(c) === normalizeCodeKey(resolvedCode));
+    const row = matrixKey ? matrixTable[matrixKey] : null;
+    if (row && (row.total !== undefined || row.sale !== undefined)) {
+      const values = {};
+      if (row.sale !== undefined) values.saleFeeRate = feeToDisplay(row.sale);
+      if (row.total !== undefined) values.totalFee = feeToDisplay(row.total);
+      if (row.synthetic !== undefined) values.syntheticFee = feeToDisplay(row.synthetic);
+      if (row.manage !== undefined) values.manageFeeRate = feeToDisplay(row.manage);
+      if (row.trustee !== undefined) values.trusteeFeeRate = feeToDisplay(row.trustee);
+      if (row.admin !== undefined) values.adminFeeRate = feeToDisplay(row.admin);
+      const m = feeToNum(row.manage), t = feeToNum(row.trustee), a = feeToNum(row.admin);
+      const s = feeToNum(row.sale), tot = feeToNum(row.total);
+      const confident = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
+      return { values, confident };
+    }
+    // 매트릭스 표는 찾았지만 이 클래스 행을 못 찾았으면(예: 표에 없는 코드) 아래 텍스트 기반으로 폴백
+  }
+
+  // 2차: 기존 텍스트 기반(클래스당 한 행) 파서
+  const region = findFeeTableRegion();
+  if (!region) return null;
+
   // 현재(감지된) 회사의 실제 코드 목록 — 코드 단독 라벨 서식에서 행 시작을 인식하고,
   // 헤더 텍스트가 앞에 붙은 라벨에서도 실제 코드를 뽑아내기 위해 필요함.
-  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
   const knownCodes = new Set(activeCodes.map(c => normalizeCodeKey(c)));
   const codesByLengthDesc = activeCodes.slice().sort((a, b) => b.length - a.length);
 
@@ -543,6 +775,38 @@ function feeDebugDump() {
   return { rows, parsed, commonTriple };
 }
 window.feeDebugDump = feeDebugDump;
+
+// 매트릭스형 보수표 전용 디버그: 개발자도구(F12)에서 feeMatrixDebugDump() 실행하면
+// feeTablePages가 채워졌는지, 헤더블록이 몇 개/어디서 잡혔는지, 각 블록에서 실제로
+// 어떤 코드ㆍ값이 나왔는지를 그대로 출력함. "클래스 선택 표에서 코드를 클릭해도 보수율이
+// 하나도 안 잡힌다"는 문제가 생기면 이걸로 실제 브라우저에서 무슨 값이 나오는지 바로 확인 가능.
+function feeMatrixDebugDump() {
+  console.log("[매트릭스보수표] feeTablePages 존재 여부:", typeof feeTablePages !== "undefined");
+  console.log("[매트릭스보수표] feeTablePages 페이지 수:", (typeof feeTablePages !== "undefined" && feeTablePages) ? feeTablePages.length : "(없음)");
+  if (typeof feeTablePages !== "undefined" && feeTablePages) {
+    console.log("[매트릭스보수표] feeTablePages 페이지 번호:", feeTablePages.map(p => p.pageNum));
+  }
+
+  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
+  console.log("[매트릭스보수표] 활성 클래스 코드:", activeCodes);
+
+  const knownCodesSet = new Set(activeCodes.map(normalizeCodeKey));
+  if (typeof feeTablePages !== "undefined" && feeTablePages) {
+    feeTablePages.forEach((p, idx) => {
+      const headers = fmFindHeaderGroups(p.items, knownCodesSet);
+      console.log(`[매트릭스보수표] 페이지 ${p.pageNum} (idx=${idx}) 헤더블록 ${headers.length}개:`,
+        headers.map(h => ({ y: h.y, codes: h.cols.map(c => c.code) })));
+    });
+  }
+
+  const matrixTable = extractFeeMatrixTable(activeCodes);
+  console.log("[매트릭스보수표] extractFeeMatrixTable 결과:", matrixTable);
+
+  console.log("[매트릭스보수표] 현재 선택된 클래스코드(getResolvedClassCode):", getResolvedClassCode());
+  console.log("[매트릭스보수표] computeFeeTableValues():", computeFeeTableValues());
+  return matrixTable;
+}
+window.feeMatrixDebugDump = feeMatrixDebugDump;
 
 const FEE_RATE_FIELD_KEYS = ["totalFee", "saleFeeRate", "manageFeeRate", "trusteeFeeRate", "adminFeeRate"];
 function refreshFeeRateFields() {

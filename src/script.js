@@ -39,6 +39,8 @@ let searchOffset = 0;        // searchableText가 fullText에서 시작하는 �
 let summaryEntries = [];     // "1. 라벨 : 값" 형태의 요약 목록 (투자설명서 맨 앞부분에 흔히 있음)
 let pageBreaks = [];         // [{charIndex, pageNum}] — 투자설명서
 let classTablePages = [];    // [{pageNum, items:[{x,y,str,width}]}] — "펀드코드"+수수료유형(선취/후취/미징구/선후취) 표가 있는 페이지의 원본 글자 좌표 (좌표 기반 클래스표 파서용)
+let feeTablePages = [];      // [{pageNum, items:[{x,y,str,width}]}] — "판매회사보수" 행이 있는 페이지의 원본 글자 좌표
+                              // (클래스가 가로로 나열되고 보수종류가 세로로 나열되는 매트릭스형 보수표 파서용, 2026-07-22 추가)
 
 // 신탁계약서(집합투자규약서)용 상태 — "영업일" 정의 조항 등 투자설명서엔 없는 내용을 별도로 파싱
 let trustDeedFullText = "";
@@ -131,6 +133,7 @@ async function extractPdfText(file, progressIds, onNumPages) {
   let textParts = [];
   const pageBreaksLocal = [];
   const classTablePagesLocal = []; // [{ pageNum, items: [{x,y,str,width}] }]
+  const feeTablePagesLocal = [];   // [{ pageNum, items: [{x,y,str,width}] }]
   let runningLength = 0;
 
   for (let i = 1; i <= numPages; i++) {
@@ -192,6 +195,20 @@ async function extractPdfText(file, progressIds, onNumPages) {
       });
     }
 
+    // 보수표가 있는 페이지인지 판별 — "판매회사보수"는 투자설명서 보수표에 항상 등장하는
+    // 고유한 라벨 문구라 오탐 위험이 낮음. 클래스가 가로로, 보수종류가 세로로 나열되는
+    // 매트릭스형 보수표(예: KCGI)에서는 기존 텍스트 기반 파서(product-individual-info.js의
+    // buildFeeTableRows)가 "클래스당 한 행" 구조를 전제로 해서 통째로 못 읽기 때문에, 클래스
+    // 표와 마찬가지로 좌표 기반 파서(feeAnalyzeMatrixTable)를 위해 원본 좌표를 보존해둠.
+    if (compactPageText.includes("판매회사보수")) {
+      feeTablePagesLocal.push({
+        pageNum: i,
+        items: content.items
+          .filter(it => it.str.trim())
+          .map(it => ({ x: it.transform[4], y: it.transform[5], str: it.str, width: it.width || it.str.length * 4 })),
+      });
+    }
+
     const tag = `\n\n[PAGE ${i}]\n\n`;
     pageBreaksLocal.push({ charIndex: runningLength, pageNum: i });
     textParts.push(tag + pageText);
@@ -202,7 +219,7 @@ async function extractPdfText(file, progressIds, onNumPages) {
     if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
   }
 
-  return { fullText: textParts.join(""), pageBreaks: pageBreaksLocal, numPages, classTablePages: classTablePagesLocal };
+  return { fullText: textParts.join(""), pageBreaks: pageBreaksLocal, numPages, classTablePages: classTablePagesLocal, feeTablePages: feeTablePagesLocal };
 }
 
 async function handleFile(file) {
@@ -218,7 +235,7 @@ async function handleFile(file) {
   $("#progressWrap").style.display = "block";
   setProgress(0, "PDF 여는 중…");
 
-  const { fullText: text, pageBreaks: pb, classTablePages: ctp } = await extractPdfText(
+  const { fullText: text, pageBreaks: pb, classTablePages: ctp, feeTablePages: ftp } = await extractPdfText(
     file,
     { fillId: "progressFill", labelId: "progressLabel" },
     (numPages) => { $("#statPages").textContent = numPages; }
@@ -226,6 +243,7 @@ async function handleFile(file) {
   fullText = text;
   pageBreaks = pb;
   classTablePages = ctp || [];
+  feeTablePages = ftp || [];
   $("#statChars").textContent = fullText.length.toLocaleString();
 
   // "이 투자설명서는 ~에 대한 자세한 내용을 담고 있습니다" 안내문구 위치를 찾아서,
