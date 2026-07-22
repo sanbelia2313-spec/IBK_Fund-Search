@@ -528,16 +528,28 @@ function ctExtractColumn(colItems, fundHeaderX) {
   if (fundGroups.length === 0) return [];
 
   // 1-1) 같은 열에서 실제 펀드코드가 "문자로 시작"하는지/"숫자로만" 이뤄지는지 형식이 갈리면,
-  // 그 열의 다수결 형식과 다른 후보는 표와 무관한 노이즈로 보고 제외한다. (2026-07-22: KB자산운용
-  // PDF에서 "C" 행의 진짜 펀드코드는 "C0556"(문자 시작)인데, 페이지 위 fundHeaderX 근처에 있던
-  // 전혀 무관한 6자리 숫자("491848")가 같은 y 근처로 잘못 걸려서 "C"의 펀드코드로 둔갑한 사례가
-  // 실제로 확인됨 — 같은 열의 다른 코드들(C0553, DD222 등)은 전부 문자로 시작하므로 다수결로
-  // 걸러낼 수 있음. 형식이 애초에 전부 숫자인 회사(예: 교보악사 "59920" 같은 순수 숫자 코드)도
-  // 있어서 무조건 "문자 시작만 허용"으로 고정하면 안 되고, 열 안에서의 다수결로만 판단한다.)
+  // 소수 쪽이 "노이즈 한두 개"로 보일 때만(전체의 20% 미만이면서 절대 개수도 2개 이하) 표와
+  // 무관한 오검출로 보고 제외한다. (2026-07-22: KB자산운용 PDF에서 "C" 행의 진짜 펀드코드는
+  // "C0556"(문자 시작)인데, 페이지 위 fundHeaderX 근처에 있던 전혀 무관한 6자리 숫자("491848")가
+  // 같은 y 근처로 잘못 걸려서 "C"의 펀드코드로 둔갑한 사례가 실제로 확인됨 — 이때는 노이즈가 딱
+  // 1개뿐이라 다수결로 걸러도 안전함.
+  // ⚠️ (2026-07-22 수정) 처음엔 "적은 쪽 그룹 전체를 버림"으로 짰었는데, 한화자산운용처럼 같은
+  // 표 안에 정말로 두 코드 형식이 공존하는 회사(오래된 클래스 A/B1~B5/F/I/W는 순수 숫자 5자리,
+  // 최근 신설 클래스 A-e/RP·RPe/S-P·S-RP/J-e 등은 문자+숫자)에서는 소수 쪽이 10개, 다수 쪽이
+  // 12개처럼 거의 반반으로 갈려서, 소수 쪽(=실제로는 절반 가까운 정상 클래스들)이 통째로
+  // "노이즈"로 오판되어 버려지는 문제가 발생함(실제 한화글로벌헬스케어 펀드로 확인: A, B1~B5, F, 
+  // I, W가 전부 누락됨). 노이즈는 보통 "표 전체에서 1~2개 튀는 값"이라는 전제가 있어야 걸러도
+  // 안전하므로, 절대 개수(3개 이상)와 비율(20% 이상) 중 하나라도 넘으면 노이즈가 아니라 "실제
+  // 두번째 코드 형식"으로 보고 필터링을 하지 않는다.
   const alphaGroups = fundGroups.filter(g => /^[A-Za-z]/.test(g.text));
   const numericGroups = fundGroups.filter(g => !/^[A-Za-z]/.test(g.text));
   if (alphaGroups.length > 0 && numericGroups.length > 0) {
-    fundGroups = alphaGroups.length >= numericGroups.length ? alphaGroups : numericGroups;
+    const total = alphaGroups.length + numericGroups.length;
+    const minorityGroups = alphaGroups.length <= numericGroups.length ? alphaGroups : numericGroups;
+    const majorityGroups = alphaGroups.length <= numericGroups.length ? numericGroups : alphaGroups;
+    const minorityLooksLikeNoise = minorityGroups.length <= 2 && (minorityGroups.length / total) < 0.2;
+    if (minorityLooksLikeNoise) fundGroups = majorityGroups;
+    // else: 두 형식이 실질적으로 공존하는 것으로 보고 fundGroups를 그대로 둔다 (둘 다 유지).
   }
   if (fundGroups.length === 0) return [];
 
