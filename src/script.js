@@ -260,13 +260,24 @@ async function handleFile(file) {
   runSafely(() => { if (typeof renderFundClass === "function") renderFundClass(); }, "펀드분류 렌더링");
 
   // 공공데이터포털(금융위원회_펀드상품기본정보) 조회로 설정일/펀드유형/협회표준코드/
-  // 상품분류코드(2차·11차분류) 보강. PDF기반 값이 이미 채워진 뒤 덮어쓰는 순서.
-  // 조회가 실패해도(네트워크 오류, 매칭 실패 등) 예외를 던지지 않으므로 이후 단계는 그대로 진행됨.
-  // 공백이 다 지워진 baseKrName은 공공데이터 API 검색(likeFndNm)엔 안 맞으므로,
-  // 실제 띄어쓰기가 살아있는 baseKrNameRaw를 우선 쓴다.
-  const pubApiSearchName = (typeof baseKrNameRaw !== "undefined" && baseKrNameRaw) ? baseKrNameRaw : baseKrName;
-  if (typeof publicApiAutoFill === "function" && typeof baseKrName !== "undefined" && pubApiSearchName) {
-    await publicApiAutoFill(pubApiSearchName);
+  // 상품분류코드(2차·11차분류) 보강.
+  // ★ 우선순위: 1) API(2차/11차분류) 2) PDF기반 추출값(fallback).
+  //   PDF기반 값(fcAutoExtract)이 먼저 채워지지만, 이건 "API가 등록이 안 되어 있거나
+  //   조회에 실패했을 때"를 대비한 후순위 값일 뿐이다. 아래 publicApiAutoFill이 성공하면
+  //   applyPublicApiFields가 해당 항목들을 곧바로 덮어써서 API 값이 최종적으로 채택된다.
+  //   (API가 그 항목에 대해 값을 못 내놓는 경우, 예: EE의 개인/법인 구분, 51/91처럼
+  //   #fcType에 대응 옵션이 없는 2차분류 등만 PDF기반 값이 그대로 유지됨)
+  // ★ PDF↔API 매칭 기준(2026-07-15에 펀드명 기반이었던 것을 2026-07-21 변경): 펀드명
+  //   퍼지검색(likeFndNm) 대신, PDF 클래스표에 적힌 "금융투자협회 펀드코드"를 API의
+  //   단축코드(srtnCd)로 그대로 조회해서 정확히 일치하는지로만 판단한다(펀드코드=단축코드
+  //   는 같은 값이라 다를 일이 없음). getActiveClassTable()이 PDF에서 직접 뽑은 표(각 행에
+  //   fundCode 포함)를 넘겨주고, 그중 하나도 API에 없으면 "미등록"으로 보고 아래
+  //   publicApiAutoFill이 아무것도 덮어쓰지 않아 PDF기반 값이 그대로 최종값이 된다.
+  // 조회가 실패해도(네트워크 오류, 서비스키 미등록, 매칭 실패 등) 예외를 던지지 않으므로
+  // 이후 단계는 그대로 진행됨 — 이 경우 PDF기반 값이 그대로 최종값이 된다.
+  if (typeof publicApiAutoFill === "function") {
+    const classTableForApi = (typeof getActiveClassTable === "function") ? getActiveClassTable() : [];
+    await publicApiAutoFill(classTableForApi);
   }
 
   runSafely(() => { if (typeof refreshIndividualInfo === "function") refreshIndividualInfo(); }, "상품개별정보 자동계산");

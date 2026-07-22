@@ -103,9 +103,32 @@ function refreshClassDependentOptions() {
   }
 }
 
-pnFields.class1.addEventListener("change", refreshClassDependentOptions);
-pnFields.class2.addEventListener("change", refreshClassDependentOptions);
-pnFields.class3.addEventListener("change", refreshClassDependentOptions);
+pnFields.class1.addEventListener("change", () => { refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
+pnFields.class2.addEventListener("change", () => { refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
+pnFields.class3.addEventListener("change", () => { refreshClassDependentOptions(); refreshKofiaCodeForCurrentClass(); });
+
+// 지금 1~3차 드롭다운 조합에 해당하는 클래스표 행을 찾아 반환 (fundCode 포함 — product-public-api.js의
+// applyKofiaCodeForCurrentClass가 이 fundCode로 협회표준코드를 다시 찾아 넣는 데 씀).
+// refreshClassDependentOptions()의 "matched" 계산과 동일한 기준이지만, 여러 건이 매칭되면
+// (예: 2차/3차를 아직 안 좁혔을 때) 그중 첫 번째만 사용함 — 협회표준코드는 참고용 보조값이라
+// 완벽한 단일 매칭이 아니어도 괜찮음.
+function getCurrentClassEntry() {
+  const table = getActiveClassTable();
+  const t1 = pnFields.class1.value, t2 = pnFields.class2.value, t3 = pnFields.class3.value;
+  if (!t1 || t1 === "없음") return null;
+  return table.find(e =>
+    e.tier1 === t1 &&
+    (t2 === "없음" || e.tier2 === t2) &&
+    (t3 === "없음" || e.tier3 === t3)
+  ) || null;
+}
+
+// 클래스 선택이 바뀔 때마다(자동감지/수동클릭/드롭다운 직접수정 전부) 협회표준코드도 같이
+// 다시 맞춰줌. product-public-api.js가 아직 로드 전이거나 API 매칭이 아예 없었던 경우엔
+// PUBLIC_API_STATE.srtnCdMap이 비어있을 뿐이라 조용히 아무 것도 안 하고 넘어감.
+function refreshKofiaCodeForCurrentClass() {
+  if (typeof applyKofiaCodeForCurrentClass === "function") applyKofiaCodeForCurrentClass();
+}
 
 // "클래스 규칙 확인" 표에서 코드를 클릭했을 때 호출됨 (class-checker.js에서 호출).
 // 1) 1~3차 드롭다운을 그 코드에 맞게 세팅
@@ -145,6 +168,10 @@ function applyClassCodeSelection(entry) {
 
   // 상품개별정보(전환그룹코드/클래스구분/인터넷뱅킹판매)도 이 클래스 선택 기준으로 다시 계산
   if (typeof refreshIndividualInfo === "function") refreshIndividualInfo();
+
+  // 협회표준코드도 이 클래스 선택 기준으로 다시 맞춤 (클래스마다 다른 값이라 API 매칭이
+  // 있었다면 여기서 새로 찾아 넣어줘야 함 — product-public-api.js)
+  refreshKofiaCodeForCurrentClass();
 }
 
 // PDF 업로드 시 상품명 칸 7개를 전부 채움. 못 찾은 항목은 값 자체를 "없음"으로 명시함
