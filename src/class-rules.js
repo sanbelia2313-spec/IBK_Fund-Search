@@ -514,9 +514,23 @@ const CT_VALID_CODE_RE = /^[A-Za-z][A-Za-z0-9]{0,2}(?:-[A-Za-z가-힣0-9][A-Za-z
 function ctExtractColumn(colItems, fundHeaderX) {
   // 1) 펀드코드로 보이는 행(y그룹) 찾기 — 펀드코드 헤더 x 근처, 영숫자 4~8자
   const fundBandRaw = colItems.filter(it => Math.abs(it.x - fundHeaderX) < 40);
-  const fundGroups = ctGroupByY(fundBandRaw, 1.5)
+  let fundGroups = ctGroupByY(fundBandRaw, 1.5)
     .map(g => ({ y: g.y, text: ctMergeLine(g.items).replace(/\s+/g, "") }))
     .filter(g => /^[A-Za-z0-9]{4,8}$/.test(g.text) && /[0-9]/.test(g.text));
+  if (fundGroups.length === 0) return [];
+
+  // 1-1) 같은 열에서 실제 펀드코드가 "문자로 시작"하는지/"숫자로만" 이뤄지는지 형식이 갈리면,
+  // 그 열의 다수결 형식과 다른 후보는 표와 무관한 노이즈로 보고 제외한다. (2026-07-22: KB자산운용
+  // PDF에서 "C" 행의 진짜 펀드코드는 "C0556"(문자 시작)인데, 페이지 위 fundHeaderX 근처에 있던
+  // 전혀 무관한 6자리 숫자("491848")가 같은 y 근처로 잘못 걸려서 "C"의 펀드코드로 둔갑한 사례가
+  // 실제로 확인됨 — 같은 열의 다른 코드들(C0553, DD222 등)은 전부 문자로 시작하므로 다수결로
+  // 걸러낼 수 있음. 형식이 애초에 전부 숫자인 회사(예: 교보악사 "59920" 같은 순수 숫자 코드)도
+  // 있어서 무조건 "문자 시작만 허용"으로 고정하면 안 되고, 열 안에서의 다수결로만 판단한다.)
+  const alphaGroups = fundGroups.filter(g => /^[A-Za-z]/.test(g.text));
+  const numericGroups = fundGroups.filter(g => !/^[A-Za-z]/.test(g.text));
+  if (alphaGroups.length > 0 && numericGroups.length > 0) {
+    fundGroups = alphaGroups.length >= numericGroups.length ? alphaGroups : numericGroups;
+  }
   if (fundGroups.length === 0) return [];
 
   // 2) 행 간격(펀드코드 y들의 전형적인 간격)을 구해서, "이 조각이 어느 행에 속하는지" 판단할 반경을 정함
@@ -616,7 +630,7 @@ function extractClassTableGeometric() {
     rows.forEach(r => {
       if (!r.code || seenCodes.has(r.code)) return;
       seenCodes.add(r.code);
-      results.push({ code: r.code, ...parseClassDescription(r.desc) });
+      results.push({ code: r.code, fundCode: r.fundCode, ...parseClassDescription(r.desc) });
     });
   });
   return results;
@@ -643,7 +657,7 @@ function extractClassTableFromText(text) {
     if (/^[a-z]$/.test(code)) continue;
     if (seenCodes.has(code)) continue;
     seenCodes.add(code);
-    results.push({ code, ...parseClassDescription(m[2]) });
+    results.push({ code, fundCode: m[3], ...parseClassDescription(m[2]) });
   }
 
   CLASS_TABLE_RE_B.lastIndex = 0;
@@ -651,7 +665,7 @@ function extractClassTableFromText(text) {
     const code = m[2];
     if (seenCodes.has(code)) continue;
     seenCodes.add(code);
-    results.push({ code, ...parseClassDescription(m[1]) });
+    results.push({ code, fundCode: m[3], ...parseClassDescription(m[1]) });
   }
 
   CLASS_TABLE_RE_C.lastIndex = 0;
@@ -660,11 +674,11 @@ function extractClassTableFromText(text) {
     const rightCode = m[5], rightDesc = m[1] + m[7]; // 앞부분 + 뒷부분을 이어붙여 완성
     if (!seenCodes.has(leftCode)) {
       seenCodes.add(leftCode);
-      results.push({ code: leftCode, ...parseClassDescription(leftDesc) });
+      results.push({ code: leftCode, fundCode: m[4], ...parseClassDescription(leftDesc) });
     }
     if (!seenCodes.has(rightCode)) {
       seenCodes.add(rightCode);
-      results.push({ code: rightCode, ...parseClassDescription(rightDesc) });
+      results.push({ code: rightCode, fundCode: m[6], ...parseClassDescription(rightDesc) });
     }
   }
 
@@ -673,7 +687,7 @@ function extractClassTableFromText(text) {
     const code = m[2];
     if (seenCodes.has(code)) continue;
     seenCodes.add(code);
-    results.push({ code, ...parseClassDescription(m[1] + m[4]) });
+    results.push({ code, fundCode: m[3], ...parseClassDescription(m[1] + m[4]) });
   }
 
   return results;

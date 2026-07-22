@@ -64,7 +64,7 @@ const piFields = {
 // 회사마다 표기 방식이 달라 100% 정확한 자동 매핑은 불가능하므로, 애매한 조합(연금·기관 등
 // 세부 tier가 섞인 코드)은 자동으로 채우지 않고 사용자가 직접 드롭다운에서 고르도록 비워둠.
 const STANDARD_CLASS_OPTIONS = [
-  "A Class", "Ae Class", "B Class", "C1 Class", "C2 Class", "C3 Class", "C4 Class", "C5 Class",
+  "A Class", "Ae Class", "B Class", "C Class", "C1 Class", "C2 Class", "C3 Class", "C4 Class", "C5 Class",
   "Ce Class", "CP Class", "CPe Class", "CW Class", "D Class", "F Class", "I Class",
   "A-G Class", "C-G Class", "C-O Class", "C-Oe Class",
 ];

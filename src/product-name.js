@@ -116,6 +116,14 @@ function getCurrentClassEntry() {
   const table = getActiveClassTable();
   const t1 = pnFields.class1.value, t2 = pnFields.class2.value, t3 = pnFields.class3.value;
   if (!t1 || t1 === "없음") return null;
+
+  // "없음"은 2차/3차에서 "아직 선택 안 함"(와일드카드) 의미로도 쓰이지만, 동시에 일부 코드는
+  // 실제로 tier3="없음"을 갖고 있음(예: KB자산운용 "C"는 tier3=없음). 그래서 먼저 지금 선택된
+  // 값 그대로("없음"도 포함) 완전히 일치하는 항목을 찾고, 있으면 그걸 쓴다. 완전 일치가 없을
+  // 때만 "없음"을 와일드카드로 넓혀서 다시 찾는다 (getResolvedClassCode와 동일한 원칙).
+  const exactMatch = table.find(e => e.tier1 === t1 && e.tier2 === t2 && e.tier3 === t3);
+  if (exactMatch) return exactMatch;
+
   return table.find(e =>
     e.tier1 === t1 &&
     (t2 === "없음" || e.tier2 === t2) &&

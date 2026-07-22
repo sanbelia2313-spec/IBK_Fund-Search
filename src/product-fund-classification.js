@@ -470,10 +470,11 @@ function fcAutoExtract() {
   const fundType = fcExtractFundType();
   if (fundType) { fcSet("fund_type", fundType); didFind = true; }
 
-  // 파생투자여부 / 파생결합증권편입구분: 펀드유형구분이 "파생상품"이면 예, 아니면 아니오
+  // 파생투자여부: 펀드유형구분이 "파생상품"이면 예, 아니면 아니오
   const derivativeAnswer = fundType === "파생상품" ? "예" : "아니오";
   fcSet("fund_derivative", derivativeAnswer);
-  fcSet("fund_els_usage", derivativeAnswer);
+  // 파생결합증권편입구분: 더 이상 사용하지 않는 항목 — 항상 "미사용"으로 고정 (2026-07-22)
+  fcSet("fund_els_usage", "미입력");
   didFind = true;
 
   const classLine = fcFindClassificationLine(searchableText);

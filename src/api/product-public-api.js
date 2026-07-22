@@ -186,32 +186,178 @@ async function fetchFundInfoBySrtnCd(srtnCd) {
   return items.length ? items[0] : null;
 }
 
+// fetchFundInfoBySrtnCd를 최대 2번까지 재시도(총 3회 시도)하는 래퍼.
+// (2026-07-22 추가) 이 공공데이터 API는 한 펀드당 클래스별로 srtnCd가 10개 넘게 있는 경우가
+// 흔한데, matchPdfFundCodesToApi가 그걸 전부 한꺼번에(Promise.all) 동시 호출하다 보니 API의
+// 초당/동시 요청 제한에 걸려서 일부 요청만 랜덤하게 실패하는 문제가 실제로 확인됨(같은 srtnCd를
+// curl로 단독 호출하면 정상 응답이 오는데, 브라우저에서 다른 14개와 동시에 호출하면 그 중 몇
+// 개는 실패함). 실패한 호출만 짧은 대기 후 재시도해서 이 문제를 완화한다.
+async function fetchFundInfoBySrtnCdWithRetry(srtnCd, maxRetries = 2) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetchFundInfoBySrtnCd(srtnCd);
+    } catch (e) {
+      lastErr = e;
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 300 * (attempt + 1))); // 300ms, 600ms 대기 후 재시도
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// 배열의 각 항목에 대해 비동기 작업을 실행하되, 동시에 최대 `limit`개까지만 진행시키는
+// 간단한 동시성 제한 헬퍼. (2026-07-22 추가 — 위 재시도 로직과 함께, API 요청 제한 문제의
+// 근본 원인인 "한꺼번에 다 쏘기"를 없애기 위함. limit=4 정도면 15개 안팎의 클래스 수에서도
+// 체감 속도 저하 없이 요청 제한을 피할 수 있었음)
+async function runWithConcurrencyLimit(items, limit, worker) {
+  const queue = items.slice();
+  const runners = new Array(Math.min(limit, queue.length)).fill(null).map(async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
 // classTable: getActiveClassTable()이 반환하는 행 배열([{code, tier1, tier2, tier3, fundCode}, ...]).
 // fundCode(=PDF에 적힌 "금융투자협회 펀드코드")가 있는 행만 대상으로, 그 값을 그대로 srtnCd로
 // 조회함. 하드코딩된 참고표(회사별로 미리 등록해둔 표)로 대체된 경우엔 fundCode 자체가 없으므로
 // (실제 펀드마다 다른 값이라 하드코딩할 수 없음) 자동으로 대상에서 빠짐 — 이 경우 매칭 결과가
 // 통째로 0건이 되어 아래 publicApiAutoFill에서 "API 미등록"으로 간주되고 PDF기반 값만 쓰게 됨.
 // 반환값: { fundCode: apiRecord } 맵. 조회 실패/불일치 건은 그냥 맵에서 빠짐(전체 흐름은 안 막음).
+//
+// ⚠️ (2026-07-22) 이 방식은 이제 "보조 수단"으로만 남겨둠 — PDF 표에서 클래스별 펀드코드
+// 15개 안팎을 좌표로 하나하나 추출해야 해서 표 레이아웃이 조금만 틀어져도(실제로 KB자산운용
+// PDF에서 "C" 클래스 행에 무관한 6자리 숫자가 잘못 걸리는 사례로 확인됨) 틀린 값이 섞여들
+// 위험이 있음. 아래 matchFundNameToApi()(이름검색 기반)가 훨씬 안정적이라 그걸 우선 쓰고,
+// 이름검색이 실패했을 때만(이름 자체를 못 뽑았거나 API가 이름으로 못 찾을 때) 이걸로 대체함.
 async function matchPdfFundCodesToApi(classTable) {
   const fundCodes = Array.from(new Set(
     (classTable || []).map(r => r.fundCode).filter(Boolean)
   ));
 
   const srtnCdMap = {};
-  await Promise.all(fundCodes.map(async fundCode => {
+  // 예전엔 Promise.all로 전부 동시에 쐈는데, 그러면 API 요청 제한에 걸려 일부가 랜덤하게
+  // 실패했음(위 fetchFundInfoBySrtnCdWithRetry 주석 참고). 동시 4개로 제한 + 실패 시 재시도.
+  await runWithConcurrencyLimit(fundCodes, 4, async fundCode => {
     try {
-      const rec = await fetchFundInfoBySrtnCd(fundCode);
+      const rec = await fetchFundInfoBySrtnCdWithRetry(fundCode);
       // rec.srtnCd가 요청한 fundCode와 실제로 같은지 한 번 더 확인 (API가 혹시 다른 필드로도
       // 매칭해서 다른 코드를 돌려주는 예외적인 경우를 대비한 방어적 체크)
       if (rec && (!rec.srtnCd || rec.srtnCd === fundCode)) {
         srtnCdMap[fundCode] = rec;
       }
     } catch (e) {
-      console.warn(`[공공데이터] srtnCd=${fundCode} 조회 실패:`, e.message);
+      console.warn(`[공공데이터] srtnCd=${fundCode} 조회 실패(재시도 포함):`, e.message);
     }
-  }));
+  });
   return srtnCdMap;
 }
+
+// ------------------------------------------------------------
+// 이름검색(likeFndNm) 기반 매칭 — 2026-07-22 추가, 이제 이게 기본(1차) 경로임.
+//
+// PDF 좌표에서 클래스별 펀드코드를 일일이 추출하는 대신, PDF에서 이미 뽑아둔 "클래스 코드
+// 붙기 전 원본 펀드명"(product-name.js의 baseKrNameRaw)을 그대로 이 API의 likeFndNm(펀드명
+// 퍼지검색) 파라미터에 넣어서, 같은 펀드의 모든 클래스 레코드를 한 번에 받아온다.
+// 이 API의 fndNm은 "OOO증권 자투자신탁(주식-파생형)(H) C-Pe" 처럼 원본 펀드명 뒤에 정확히
+// 클래스 코드가 붙어 나오므로(실제 KB자산운용 펀드로 직접 확인함, 2026-07-22), 그 꼬리 부분만
+// 떼어내면 "클래스 코드 → API 레코드" 맵을 좌표 추정 없이 그대로 만들 수 있다.
+// (모펀드 자체 레코드는 꼬리가 "(운용)" 같은 식이라 클래스 코드 형식이 아니므로 자동으로 걸러짐)
+async function fetchFundInfoByLikeFndNm(likeFndNm) {
+  if (!likeFndNm) return [];
+
+  const params = new URLSearchParams({
+    serviceKey: PUBLIC_API_SERVICE_KEY,
+    resultType: "json",
+    numOfRows: "50", // 클래스가 아무리 많아도(보통 15개 안팎) 한 번에 다 담기에 충분한 여유치
+    pageNo: "1",
+    likeFndNm,
+  });
+
+  const res = await fetch(`${PUBLIC_API_BASE}?${params.toString()}`);
+  if (!res.ok) throw new Error(`공공데이터 API HTTP 오류: ${res.status}`);
+  const data = await res.json();
+
+  const header = data?.response?.header;
+  if (header && header.resultCode !== "00") {
+    throw new Error(`공공데이터 API 오류 [${header.resultCode}] ${header.resultMsg}`);
+  }
+
+  const rawItems = data?.response?.body?.items?.item;
+  if (!rawItems) return [];
+  return Array.isArray(rawItems) ? rawItems : [rawItems];
+}
+
+// 실제 클래스 코드로 보이는 형태인지 검사. class-rules.js의 CT_VALID_CODE_RE와 동일한 기준을
+// 쓰되, 그 파일이 어떤 이유로 아직 로드 전이거나 없어도(로드 순서 방어) 안전하게 동작하도록
+// 이 파일 안에도 동일한 정규식을 하나 더 갖고 있는다(중복이지만 이 파일의 독립성을 위함).
+const PA_VALID_CLASS_CODE_RE = /^[A-Za-z][A-Za-z0-9]{0,2}(?:-[A-Za-z가-힣0-9][A-Za-z가-힣0-9]{0,5}){0,2}(?:\([가-힣0-9]{1,10}\))?$/;
+
+// fndNm(예: "KB스타 미국 나스닥 100 인덱스 증권 자투자신탁(주식-파생형)(H) C-Pe")에서
+// baseName(예: "KB스타 미국 나스닥 100 인덱스 증권 자투자신탁(주식-파생형)(H)") 접두어를 뗀
+// 나머지를 클래스 코드로 반환. PDF와 API 양쪽의 공백 표기가 완전히 같지 않을 수 있어서, 공백을
+// 다 지운 문자열끼리 비교해 접두어 일치 여부/길이를 구하고, 그 길이만큼만 원본(공백 포함)
+// fndNm에서 건너뛰어 꼬리를 얻는다(중간에 공백이 있어도 어긋나지 않도록).
+function stripBaseNameToClassCode(fndNm, baseName) {
+  if (!fndNm || !baseName) return "";
+  const normFnd = fndNm.replace(/\s+/g, "");
+  const normBase = baseName.replace(/\s+/g, "");
+  if (!normFnd.startsWith(normBase)) return "";
+
+  let normConsumed = 0, rawIdx = 0;
+  while (normConsumed < normBase.length && rawIdx < fndNm.length) {
+    if (!/\s/.test(fndNm[rawIdx])) normConsumed++;
+    rawIdx++;
+  }
+  return fndNm.slice(rawIdx).trim();
+}
+
+// API 레코드 자신의 fndNm에서 마지막 공백 토큰(클래스 코드, 예: "C", "C-Pe")을 떼어내
+// "API가 실제로 쓰는 정확한 공백 표기의 원본 펀드명"을 얻는다. (2026-07-22 추가)
+// PDF에서 뽑은 baseKrNameRaw를 그대로 likeFndNm에 쓰면, PDF와 API의 공백 표기가 완전히
+// 같지 않을 때(실제로 공백 위치가 하나만 달라도 0건 반환되는 걸 확인함) 조용히 실패할 위험이
+// 있음. 반대로 이미 확인된 API 레코드 자신의 문자열에서 뽑으면 공백 표기가 API와 100% 일치
+// 하므로 이 문제가 원천적으로 없다. 마지막 토큰이 클래스 코드 형식(PA_VALID_CLASS_CODE_RE)이
+// 아니면(예: 모펀드 자체 레코드처럼 "...(H)(운용)"으로 끝나 공백 분리가 안 되는 경우) 신뢰할 수
+// 없다고 보고 빈 문자열을 반환한다 — 호출부가 이 경우 다른 방법으로 넘어간다.
+function deriveBaseNameFromAnchorRecord(fndNm) {
+  if (!fndNm) return "";
+  const trimmed = fndNm.trim();
+  const lastSpace = trimmed.lastIndexOf(" ");
+  if (lastSpace === -1) return "";
+  const suffix = trimmed.slice(lastSpace + 1).trim();
+  if (!PA_VALID_CLASS_CODE_RE.test(suffix)) return "";
+  return trimmed.slice(0, lastSpace).trim();
+}
+
+// baseName(클래스 코드 붙기 전 원본 펀드명)으로 likeFndNm 검색해서, 클래스 코드별 API 레코드
+// 맵({ classCode: apiRecord })을 만들어 반환. 검색 자체가 실패하거나(네트워크 오류 등) 결과가
+// 0건이면 빈 객체를 반환 — 호출부(publicApiAutoFill)가 그때 기존 PDF기반 방식으로 대체한다.
+async function matchFundNameToApi(baseName) {
+  if (!baseName) return {};
+  let records;
+  try {
+    records = await fetchFundInfoByLikeFndNm(baseName);
+  } catch (e) {
+    console.warn("[공공데이터] likeFndNm 검색 실패:", e.message);
+    return {};
+  }
+
+  const classCodeMap = {};
+  records.forEach(rec => {
+    const code = stripBaseNameToClassCode(rec.fndNm, baseName);
+    if (code && PA_VALID_CLASS_CODE_RE.test(code) && !classCodeMap[code]) {
+      classCodeMap[code] = rec;
+    }
+  });
+  return classCodeMap;
+}
+
+
 
 // item: matchPdfFundCodesToApi()로 확보한 매칭 레코드 중 대표 1건(설정일이 가장 이른 것).
 // 화면에 반영하고 어떤 항목을 채웠는지/건너뛰었는지 알려준다 (콘솔 확인 및 추후 UI 안내용).
@@ -322,24 +468,27 @@ function applyPublicApiFields(item) {
   return result;
 }
 
-// srtnCdMap: matchPdfFundCodesToApi()가 만들어둔 { 펀드코드(=srtnCd): API레코드 } 맵.
+// srtnCdMap: matchPdfFundCodesToApi()(보조/폴백)가 만들어둔 { 펀드코드(=srtnCd): API레코드 } 맵.
+// classCodeMap: matchFundNameToApi()(기본/1차)가 만들어둔 { 클래스코드(예: "C","C-Pe"): API레코드 } 맵.
 // publicApiAutoFill이 조회에 성공할 때마다 여기 채워두고, 클래스 선택이 바뀔 때마다
 // (product-name.js의 applyClassCodeSelection / class1~3 change 이벤트에서) 다시 조회함.
-const PUBLIC_API_STATE = { srtnCdMap: {} };
+const PUBLIC_API_STATE = { srtnCdMap: {}, classCodeMap: {} };
 
 // "지금 선택된 클래스"에 맞는 협회표준코드를 #piKofiaFundCode에 채워 넣음.
 // getCurrentClassEntry()(product-name.js)로 현재 1~3차 드롭다운 조합에 해당하는 행을 찾고,
-// 그 행의 fundCode(=단축코드)를 PUBLIC_API_STATE.srtnCdMap에서 찾아 asoStdCd를 꺼내 씀.
+// 1차로 그 코드(entry.code, 예: "C")를 classCodeMap에서 찾고, 거기 없을 때만(이름검색이
+// 실패했거나 그 클래스만 이름검색 결과에 없는 경우) fundCode 기준 srtnCdMap으로 대체 조회함.
 // - 클래스 선택이 바뀔 때마다 다시 불러야 하므로 window에 노출해서 product-name.js에서 호출함.
-// - 이 클래스에 대해 API에서 확인된 값이 없으면(=srtnCdMap에 없음) 건드리지 않고 그대로 둠
+// - 이 클래스에 대해 API에서 확인된 값이 없으면 건드리지 않고 그대로 둠
 //   (PDF기반 값이 이미 있다면 그걸 유지, 없다면 그냥 미입력 상태 유지).
 function applyKofiaCodeForCurrentClass() {
   const kofiaCodeEl = $("#piKofiaFundCode");
   if (!kofiaCodeEl) return false;
 
   const entry = (typeof getCurrentClassEntry === "function") ? getCurrentClassEntry() : null;
-  const fundCode = entry && entry.fundCode;
-  const rec = fundCode ? PUBLIC_API_STATE.srtnCdMap[fundCode] : null;
+  const rec = entry
+    ? (PUBLIC_API_STATE.classCodeMap[entry.code] || (entry.fundCode && PUBLIC_API_STATE.srtnCdMap[entry.fundCode]))
+    : null;
 
   if (rec && rec.asoStdCd) {
     kofiaCodeEl.value = rec.asoStdCd;
@@ -354,21 +503,60 @@ function applyKofiaCodeForCurrentClass() {
 }
 
 // script.js의 handleFile()에서 클래스표 추출 뒤 호출하는 진입점.
-// classTable: getActiveClassTable()의 결과(= PDF에서 직접 뽑은 클래스표. fundCode 포함).
+// classTable: getActiveClassTable()의 결과(= PDF에서 직접 뽑은 클래스표. fundCode 포함,
+// matchPdfFundCodesToApi 폴백에서만 씀).
 // 실패해도(네트워크 오류, 매칭 실패 등) 예외를 던지지 않고 콘솔에만 남긴다 —
 // 공공데이터 조회가 실패해도 나머지(PDF기반) 자동채움 흐름은 막히면 안 되므로.
 async function publicApiAutoFill(classTable) {
   try {
+    // 1) PDF에서 뽑은 펀드코드 후보들로 "앵커" 레코드 하나 확보 시도. 전부 다 맞을 필요는
+    // 없음 — 딱 하나만 성공해도, 그 레코드의 fndNm에서 API가 실제로 쓰는 정확한 공백 표기의
+    // "원본 펀드명"을 거꾸로 얻어낼 수 있기 때문(아래 2번). 여러 개 성공하면 앵커 후보가
+    // 여러 개인 것뿐이고, 그중 첫 번째만 있으면 충분하다.
     const srtnCdMap = await matchPdfFundCodesToApi(classTable || []);
-    const matchedRecords = Object.values(srtnCdMap);
+    const anchorRecords = Object.values(srtnCdMap);
 
-    if (!matchedRecords.length) {
-      // PDF 클래스표의 펀드코드 중 API의 srtnCd와 일치하는 게 하나도 없음
-      // → 이 펀드는 (아직) API에 등록 안 된 것으로 간주하고, PDF기반 값을 그대로 둔다.
-      console.warn("[공공데이터] PDF 펀드코드와 일치하는 API(srtnCd) 레코드가 없음 — 미등록으로 간주, PDF기반 값 유지");
-      return { applied: [], skipped: ["PDF 펀드코드와 일치하는 API(srtnCd) 레코드 없음 — API 미등록으로 간주"] };
+    let classCodeMap = {};
+    let matchSource = "";
+
+    if (anchorRecords.length > 0) {
+      // 2) 앵커 레코드의 fndNm에서 클래스 코드(마지막 공백 토큰)를 떼어 "정확한 원본 펀드명"을
+      // 얻음. PDF에서 뽑은 baseKrNameRaw는 공백 표기가 API와 정확히 일치하지 않으면 likeFndNm이
+      // 조용히 0건을 반환하는 문제가 실제로 확인됐으므로, API 자기 자신의 문자열을 기준으로 삼는
+      // 게 훨씬 안전하다.
+      const canonicalBaseName = deriveBaseNameFromAnchorRecord(anchorRecords[0].fndNm);
+      if (canonicalBaseName) {
+        classCodeMap = await matchFundNameToApi(canonicalBaseName);
+        if (Object.keys(classCodeMap).length) {
+          matchSource = `이름검색(API 자체 레코드 기준 "${canonicalBaseName}")`;
+        }
+      }
     }
 
+    // 3) 위가 실패했으면(앵커가 없거나, 앵커의 fndNm에서 클래스 코드를 못 뗐거나, 이름검색
+    // 자체가 0건) PDF에서 뽑은 baseKrNameRaw로 한 번 더 시도 (공백이 우연히 일치하면 성공).
+    if (Object.keys(classCodeMap).length === 0) {
+      const pdfBaseName = (typeof baseKrNameRaw !== "undefined") ? baseKrNameRaw : "";
+      classCodeMap = await matchFundNameToApi(pdfBaseName);
+      if (Object.keys(classCodeMap).length) {
+        matchSource = "이름검색(PDF 추출명 기준)";
+      }
+    }
+
+    let matchedRecords = Object.values(classCodeMap);
+
+    // 4) 그래도 이름검색이 전부 실패했으면, 최후 수단으로 앵커(펀드코드 직접매칭) 결과만이라도 씀.
+    if (matchedRecords.length === 0 && anchorRecords.length > 0) {
+      matchedRecords = anchorRecords;
+      matchSource = "PDF 펀드코드↔API srtnCd(최종 폴백)";
+    }
+
+    if (!matchedRecords.length) {
+      console.warn("[공공데이터] 이름검색/펀드코드 매칭 모두 실패 — 미등록으로 간주, PDF기반 값 유지");
+      return { applied: [], skipped: ["이름검색/펀드코드 매칭 모두 실패 — API 미등록으로 간주"] };
+    }
+
+    PUBLIC_API_STATE.classCodeMap = classCodeMap;
     PUBLIC_API_STATE.srtnCdMap = srtnCdMap;
 
     // 설정일/펀드유형/상품분류코드처럼 클래스 상관없이 동일한 항목은, 매칭된 것들 중
@@ -377,7 +565,7 @@ async function publicApiAutoFill(classTable) {
       (cur.setpDt && (!earliest.setpDt || cur.setpDt < earliest.setpDt)) ? cur : earliest
     );
     const result = applyPublicApiFields(representative);
-    result.applied.push(`PDF 펀드코드 ↔ API srtnCd 매칭 ${matchedRecords.length}건`);
+    result.applied.push(`${matchSource} 매칭 ${matchedRecords.length}건`);
 
     // 협회표준코드는 대표 레코드가 아니라 "지금 선택된 클래스"에 맞는 값으로 별도 갱신
     if (applyKofiaCodeForCurrentClass()) {
@@ -400,6 +588,10 @@ async function publicApiAutoFill(classTable) {
 }
 
 window.fetchFundInfoBySrtnCd = fetchFundInfoBySrtnCd;
+window.fetchFundInfoBySrtnCdWithRetry = fetchFundInfoBySrtnCdWithRetry;
+window.fetchFundInfoByLikeFndNm = fetchFundInfoByLikeFndNm;
+window.matchFundNameToApi = matchFundNameToApi;
+window.deriveBaseNameFromAnchorRecord = deriveBaseNameFromAnchorRecord;
 window.matchPdfFundCodesToApi = matchPdfFundCodesToApi;
 window.applyPublicApiFields = applyPublicApiFields;
 window.applyKofiaCodeForCurrentClass = applyKofiaCodeForCurrentClass;
