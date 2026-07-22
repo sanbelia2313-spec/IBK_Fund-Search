@@ -147,6 +147,27 @@ function ciDayNums(text, type) {
     }
   }
 
+  // "다음영업일"/"익영업일"처럼 숫자 없이 자연어로만 표현하는 경우(=제2영업일, D+1과 같은 뜻).
+  // 매입 전 분기 등에서 숫자를 아예 안 적고 이렇게만 쓰는 운용사가 실제로 있음
+  // (2026-07-22, KCGI코리아증권투자신탁1호[주식] 투자설명서에서 확인: "자금을 납입일의
+  //  다음영업일에 공고되는 기준가격을 적용" — 참고로 원문의 D/D+1 다이어그램은 이미지라서
+  //  텍스트로 추출조차 안 되기 때문에, 아래 CI_OFFSET_RE만으로는 이 경우를 못 잡음).
+  const nextDayRe = /다음\s*영업일|익\s*영업일/g;
+  const nextDayMatches = [];
+  let ndm;
+  while ((ndm = nextDayRe.exec(text)) !== null) {
+    const ctx = ciNumContext(text, ndm.index);
+    nextDayMatches.push({ num: 2, ...ctx });
+  }
+  if (nextDayMatches.length > 0) {
+    if (type) {
+      const lenient = nextDayMatches.filter(x => type === "redeem" ? !(x.isBuyCtx && !x.isRedeemCtx) : !(x.isRedeemCtx && !x.isBuyCtx));
+      if (lenient.length > 0) return lenient.map(x => x.num);
+    } else {
+      return nextDayMatches.map(x => x.num);
+    }
+  }
+
   // "제N영업일"이 명시되지 않고 "다음 영업일(T+1)"처럼 오프셋 표기만 있는 경우의 보조 추출
   const offsetNums = [];
   CI_OFFSET_RE.lastIndex = 0;

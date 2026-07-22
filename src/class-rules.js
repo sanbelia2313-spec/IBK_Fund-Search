@@ -370,7 +370,12 @@ function getAllClassCodeEntries() {
 function parseClassDescription(desc) {
   // PDF에서 뽑은 원문은 줄바꿈 때문에 단어 중간이 끼어 잘리는 경우가 있음
   // (예: "무권\n유저비용", "퇴\n직연금") → 공백/줄바꿈을 다 지우고 나서 키워드 매칭함.
-  const raw = (desc || "").replace(/\s+/g, "");
+  let raw = (desc || "").replace(/\s+/g, "");
+
+  // 매트릭스형 표(ctExtractMatrixPage)에서 열 경계가 살짝 겹쳐서, 바로 옆 클래스의 글자 1개가
+  // "미징"과 "구" 사이에 잘못 끼어드는 경우가 실제로 관찰됨(예: "수수료미징)구", "수수료미징보구").
+  // "수수료미징구"는 항상 붙어있는 고정 문구라서, 그 사이에 뭔가 끼어있으면 100% 노이즈로 보고 제거.
+  raw = raw.replace(/수수료미징.?구/, "수수료미징구");
 
   let tier1 = "없음";
   if (raw.includes("수수료선후취")) tier1 = "수수료선후취";
@@ -400,6 +405,9 @@ function parseClassDescription(desc) {
   else if (raw.includes("고액2")) tier3 = "고액2";
   else if (raw.includes("고액")) tier3 = "고액";
   else if (raw.includes("보수체감")) tier3 = "보수체감";
+  // 매트릭스형 표에서 열 경계 겹침으로 "보수체감"의 "보"가 옆 열로 새는 경우가 있어서, "수체감"만
+  // 남아도(3글자라 다른 단어와 헷갈릴 위험이 낮음) 보수체감으로 인정하는 완화 규칙을 하나 더 둠.
+  else if (raw.includes("수체감")) tier3 = "보수체감";
   else if (raw.includes("전문투자자")) tier3 = "전문투자자";
   else if (raw.includes("주택마련")) tier3 = "주택마련";
   else if (raw.includes("기부")) tier3 = "기부";
@@ -592,7 +600,143 @@ function ctExtractColumn(colItems, fundHeaderX) {
   }).filter(r => CT_VALID_CODE_RE.test(r.code)); // 코드 형태가 아닌 행(=표와 무관한 페이지의 오검출)은 제외
 }
 
+// ------------------------------------------------------------
+// 매트릭스형 클래스표 파서 (ctExtractMatrixPage) — 2026-07-22 추가, KCGI 등
+// ------------------------------------------------------------
+// 위 ctExtractColumn/ctExtractPage는 "클래스 하나당 한 행(row)"에 코드+설명+펀드코드가
+// 세로로 쌓이는 표를 전제로 한다(KB/하나/교보악사 등 지금까지 다룬 회사가 전부 이 형태).
+// 그런데 KCGI 같은 회사는 반대로 "클래스를 가로로 늘어놓고(종류A 종류Ae 종류C1 ...), 그
+// 아래에 설명과 펀드코드를 클래스별로 세로 정렬해서 쌓는" 매트릭스형 표를 쓴다. 이 경우 같은
+// 클래스의 코드/설명/펀드코드가 전부 다른 y(줄)에 있고, 대신 같은 x(열)를 공유한다 — 그래서
+// y가 아니라 x로 클래스를 구분해야 한다.
+//
+// 클래스 수가 많으면 한 페이지에 이런 "가로 헤더행"이 여러 번 나올 수 있다(예: KCGI는 21개
+// 클래스가 11개+10개, 두 블록으로 나뉨). 헤더행이 나올 때마다 새 블록으로 보고, 그 블록의
+// 설명/펀드코드는 "이 헤더행 바로 아래 ~ 실제 펀드코드 행을 찾는 순간까지"로 한정해서 읽는다
+// (펀드코드 행을 찾은 다음 줄부터는 표 밖 본문이므로 더 보지 않음 — 그렇지 않으면 이 페이지에
+// 있는 관련회사 연혁 등 표와 무관한 문단까지 섞여 들어옴).
+
+// 같은 y줄에 "종류" 마커가 3개 이상 있으면 매트릭스 헤더행 후보로 인정.
+// 마커는 "종류"만 있는 별도 아이템("종류" 다음에 코드가 별도 아이템으로 옴)이거나,
+// "종류A"처럼 코드가 이미 붙어있는 아이템일 수 있음.
+function ctFindMatrixHeaderGroups(pageItems) {
+  const groups = ctGroupByY(pageItems, 2);
+  const headerGroups = [];
+  groups.forEach(g => {
+    const sorted = g.items.slice().sort((a, b) => a.x - b.x);
+    const markers = [];
+    for (let i = 0; i < sorted.length; i++) {
+      const s = sorted[i].str;
+      if (s === "종류") markers.push({ x: sorted[i].x, idx: i, fused: false });
+      else if (/^종류[A-Za-z가-힣0-9\-]/.test(s)) markers.push({ x: sorted[i].x, idx: i, fused: true });
+    }
+    if (markers.length >= 3) headerGroups.push({ y: g.y, items: sorted, markers });
+  });
+  return headerGroups.sort((a, b) => b.y - a.y); // 페이지 위쪽(y 큰 값)부터
+}
+
+// 헤더행 하나로부터 열(컬럼) 목록 [{x, code}]을 만듦.
+function ctBuildColumnsFromHeader(headerGroup) {
+  const { items, markers } = headerGroup;
+  const cols = [];
+  markers.forEach((m, i) => {
+    const nextX = i + 1 < markers.length ? markers[i + 1].x : Infinity;
+    if (m.fused) {
+      cols.push({ x: items[m.idx].x, code: items[m.idx].str.replace(/^종류/, "") });
+    } else {
+      // "종류" 바로 다음, 다음 마커 전까지 오는 토큰들을 이어붙여 코드로 삼음
+      const codeParts = items.filter((it, idx) => idx > m.idx && it.x > m.x && it.x < nextX - 1);
+      cols.push({ x: items[m.idx].x, code: codeParts.map(it => it.str).join("").replace(/\s+/g, "") });
+    }
+  });
+  return cols;
+}
+
+function ctNearestColumn(cols, x, maxDist) {
+  let best = null, bestDist = Infinity;
+  cols.forEach(c => {
+    const d = Math.abs(c.x - x);
+    if (d < bestDist) { bestDist = d; best = c; }
+  });
+  return bestDist <= maxDist ? best : null;
+}
+
+// 매트릭스형 표 전체(여러 헤더블록 가능)를 파싱해서 [{code, desc, fundCode}] 배열로 반환.
+// 표가 아닌 페이지(예: "종류CW"/"종류CI" 등이 우연히 한 문장에 여러 번 언급된 연혁 문단)에서
+// 헤더행처럼 보이는 줄이 오검출될 수 있어서, 그 블록 안에서 실제 펀드코드 행(영숫자 4~8자,
+// 숫자 포함)을 끝내 못 찾으면 그 블록은 통째로 버린다.
+function ctExtractMatrixPage(pageItems) {
+  const headerGroups = ctFindMatrixHeaderGroups(pageItems);
+  if (headerGroups.length === 0) return [];
+
+  const results = [];
+  headerGroups.forEach((hg, hi) => {
+    const cols = ctBuildColumnsFromHeader(hg);
+    if (cols.length < 3) return;
+
+    // 열 간격의 절반을 "같은 열로 인정할 최대 x거리"로 사용(행 기반 파서와 동일한 방식)
+    const xs = cols.map(c => c.x).sort((a, b) => a - b);
+    const gaps = [];
+    for (let i = 1; i < xs.length; i++) gaps.push(xs[i] - xs[i - 1]);
+    const typicalGap = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : 40;
+    const maxColDist = Math.max(typicalGap / 2 - 2, 15);
+
+    // 스캔범위 상한: 다음 헤더블록이 있으면 그 y까지, 없으면(마지막 블록) 일단 넉넉하게 잡아두고
+    // 아래에서 실제 펀드코드 행을 찾는 즉시 멈춰서 표 밖 본문이 섞이지 않게 함.
+    const upperY = hg.y - 0.5;
+    const softLowerY = hi + 1 < headerGroups.length ? headerGroups[hi + 1].y : upperY - 150;
+    const bandItems = pageItems.filter(it => it.y < upperY && it.y > softLowerY);
+    const subGroups = ctGroupByY(bandItems, 1.5).sort((a, b) => b.y - a.y);
+
+    const colBuckets = new Map(cols.map(c => [c.code, { desc: [], fundCode: "" }]));
+    let foundFundRow = false;
+
+    for (const sg of subGroups) {
+      const sorted = sg.items.slice().sort((a, b) => a.x - b.x);
+      const perCol = new Map();
+      sorted.forEach(it => {
+        const col = ctNearestColumn(cols, it.x, maxColDist);
+        if (!col) return; // 왼쪽 행라벨("금융투자협회"/"펀드코드" 등)처럼 열과 무관한 텍스트는 버림
+        if (!perCol.has(col.code)) perCol.set(col.code, []);
+        perCol.get(col.code).push(it.str);
+      });
+      if (perCol.size === 0) continue;
+
+      const joined = new Map();
+      perCol.forEach((parts, code) => joined.set(code, parts.join("").replace(/\s+/g, "")));
+
+      const fundLikeCount = Array.from(joined.values()).filter(v => /^[A-Za-z0-9]{4,8}$/.test(v) && /[0-9]/.test(v)).length;
+      const isFundCodeRow = joined.size > 0 && fundLikeCount >= Math.ceil(joined.size * 0.6);
+
+      joined.forEach((v, code) => {
+        const bucket = colBuckets.get(code);
+        if (!bucket) return;
+        if (isFundCodeRow) bucket.fundCode += v;
+        else bucket.desc += v;
+      });
+
+      // 펀드코드 행을 찾았으면 이 블록은 끝 — 그 아래(표 밖 본문)는 더 보지 않음
+      if (isFundCodeRow) { foundFundRow = true; break; }
+    }
+
+    if (!foundFundRow) return; // 실제 표가 아니었던 것으로 판단, 이 블록 전체를 버림
+
+    cols.forEach(c => {
+      const b = colBuckets.get(c.code);
+      if (!b) return;
+      results.push({ code: c.code, desc: b.desc, fundCode: b.fundCode });
+    });
+  });
+
+  return results.filter(r => CT_VALID_CODE_RE.test(r.code));
+}
+
 function ctExtractPage(pageItems) {
+  // 먼저 매트릭스형(클래스 가로배치) 표인지 시도해보고, 뽑히면 그걸 우선 사용.
+  // 못 뽑히면(=이 페이지는 매트릭스형이 아님) 기존의 행 기반 파서로 넘어감.
+  const matrixRows = ctExtractMatrixPage(pageItems);
+  if (matrixRows.length > 0) return matrixRows;
+
   const headerItem = pageItems.find(it => it.str.includes("펀드코드"));
   if (!headerItem) return [];
 
