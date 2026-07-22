@@ -24,6 +24,10 @@ function cleanFundCharParagraph(str) {
   s = s.replace(/\n\s*-?\s*\d{1,4}\s*-?\s*\n/g, " "); // 단독 쪽번호 줄 제거
   s = s.replace(/\s+/g, " ").trim();
   s = s.replace(/\s*(?=(?:\d{1,2}\)|①|②|③|④|⑤|⑥|※))/g, "\n").trim();
+  // "- 이 투자신탁은 ~~~. - 이 투자신탁은 ~~~." 처럼 이어지는 "- 문장" 글머리 기호(bullet)들을
+  // 한 줄에 다 붙여서 보여주면 눈에 잘 안 들어오므로, 문장 중간의 "- " 글머리 기호 앞에서 문단을 나눔.
+  // (날짜/숫자 범위 등에 쓰이는 하이픈과 헷갈리지 않도록, 뒤에 한글이 오는 "- "만 글머리 기호로 인식함)
+  s = s.replace(/\s-\s+(?=[가-힣])/g, "\n\n- ").trim();
   return s;
 }
 
@@ -75,11 +79,20 @@ function findInvestStrategyFromSummaryBox(text) {
 //     부연설명으로 넘어가므로, 있으면 최우선으로 여기서 끊음.
 function findInvestStrategySummary(text) {
   if (!text) return null;
-  // "(1)투자전략" / "1)투자전략" / "가.투자전략" 등 운용사별 표기를 모두 인식
-  const anchorRe = new RegExp(
-    "(?:\\(\\s*1\\s*\\)|1\\s*\\)|가\\s*\\.)\\s*" + loosePattern("투자전략") + "(?![가-힣])"
+  // "(1)투자전략" / "1)투자전략" 표기를 최우선으로 찾음 — 이 표기는 언제나 투자전략만 단독으로 가리키는
+  // 소제목이라 안전함. "가.투자전략"도 일부 운용사는 단독 소제목으로 쓰지만, 다른 운용사(예: KB자산운용)는
+  // "가. 투자전략 및 위험관리"처럼 하위의 "(1) 투자전략"과 "(2) 위험관리"를 함께 묶는 상위 소제목으로 쓴다.
+  // 이 경우 예전 정규식은 "가. 투자전략"까지만 보고 매칭해버려서, 시작 지점이 " 및 위험관리 (1) 투자전략" 앞
+  // 이 되어 "및 위험관리"가 요약문 맨 앞에 끼어 붙는 문제가 있었음. 그래서 "가." 매칭은 뒤에 "및"이나 ","가
+  // 붙어 다른 항목과 묶여있지 않은 경우에만(즉 진짜 단독 소제목일 때만) 허용하고, (1)/1) 표기가 있으면 항상
+  // 그것을 우선 사용함(2026-07-22, KB자산운용 실제 데이터로 확인).
+  const numberedRe = new RegExp(
+    "(?:\\(\\s*1\\s*\\)|1\\s*\\))\\s*" + loosePattern("투자전략") + "(?![가-힣])"
   );
-  const m = text.match(anchorRe);
+  const plainGaRe = new RegExp(
+    "가\\s*\\.\\s*" + loosePattern("투자전략") + "(?!\\s*[,및])(?![가-힣])"
+  );
+  const m = text.match(numberedRe) || text.match(plainGaRe);
   if (!m) return null;
   const start = m.index + m[0].length;
 
