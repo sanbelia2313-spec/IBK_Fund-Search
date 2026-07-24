@@ -1345,7 +1345,8 @@ function refreshSpecialFlags() {
   }
 }
 
-// 질권설정비율 — 펀드유형(자본시장법상: fcCapitalType)과 그 하위분류(fcCapitalSubType) 기준.
+// 질권설정비율 — 우선 연금클래스(isCpFamilyClass()) 여부를 먼저 보고, 아니면 펀드유형
+// (자본시장법상: fcCapitalType)과 그 하위분류(fcCapitalSubType) 기준으로 계산한다.
 // 하위분류가 "재간접"인 경우엔 그 자체만으로는 주식/채권 성격을 알 수 없으므로, 위쪽
 // "펀드유형구분"(fcType — 펀드명 기반으로 이미 주식형/채권형/혼합형/MMF 등을 판정해둔 값)을
 // 그대로 따라가서 같은 비율표를 적용한다. (2026-07-15 확인: "재간접형은 위에 펀드유형구분을
@@ -1360,6 +1361,12 @@ function pledgeRatioFromFundType(fundType) {
 }
 
 function computePledgeRatio() {
+  // (2026-07-24 추가) 연금클래스(3차명에 "연금" 포함 — isCpFamilyClass())는 펀드의 실제
+  // 자산유형(주식형/채권형 등)과 무관하게 무조건 50%를 우선 적용한다. 사용자 확인: "펀드유형과는
+  // 무관하게 우선적으로 클래스가 연금클래스면 50%로 나와야해". 아래 자산유형 기준 계산보다
+  // 먼저 검사해서, 예를 들어 채권형 펀드의 개인연금/퇴직연금 클래스도 50%로 나오게 한다.
+  if (typeof isCpFamilyClass === "function" && isCpFamilyClass()) return "50%";
+
   const capitalType = ($("#fcCapitalType") || {}).value || "";
   const subType = ($("#fcCapitalSubType") || {}).value || "";
   if (capitalType === "단기금융") return "100%";
