@@ -530,12 +530,21 @@ function refreshFrontLoadFeeField() {
     piFields.frontLoadFee.classList.add("none-found");
     return;
   }
+  // (2026-07-24 추가) 수수료징수방법(computeFeeCollectMethod)이 "선취"가 아니면 그 클래스는
+  // 애초에 선취수수료 자체가 없는 것이므로, 표에서 못 찾아 비어있는 것과 구분하기 위해
+  // 명시적으로 "-"를 채운다. (예: 후취/미징구/선후취 클래스는 늘 "-", A 계열만 실제 % 값)
+  const feeMethod = computeFeeCollectMethod();
+  if (feeMethod && feeMethod !== "선취") {
+    piFields.frontLoadFee.value = "-";
+    piFields.frontLoadFee.classList.add("auto-filled");
+    return;
+  }
   const val = computeFrontLoadFeeValue(resolvedCode);
   if (val) {
     piFields.frontLoadFee.value = val;
     piFields.frontLoadFee.classList.add("auto-filled");
   } else {
-    // 선취(A 계열 등) 클래스가 아니거나 표에서 못 찾은 경우 → 미입력
+    // 선취 클래스인데 표에서 값을 못 찾은 경우만 미입력으로 남김 (직접 확인 필요)
     piFields.frontLoadFee.value = "";
     piFields.frontLoadFee.classList.add("none-found");
   }
