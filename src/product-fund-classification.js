@@ -163,19 +163,50 @@ function fcFindOptionNearMatches(text, re, options, windowSize) {
   return null;
 }
 
+// (2026-07-24 수정) 실제 KB 신탁계약서(홍콩상하이은행 케이스)로 검증해보니 아래 기존 두 패턴이
+// 전혀 매치되지 않는 문서가 있었음 — "집합투자재산"이 아니라 "투자신탁재산"이라 쓰는 문서,
+// 그리고 "신탁업자인 OOO은행이 ~ 수행하여야 할 업무" 처럼 "신탁업자" 뒤에 "회사"라는 글자 자체가
+// 안 붙고 은행명이 바로 나오는 문서가 있었기 때문. 놓치는 케이스가 없도록 신뢰도 높은 순서로
+// 후보를 여러 개 두고, 앞에서부터 순서대로 시도해서 처음 매치되는 것을 채택한다.
 function fcExtractTrustee(text) {
-  // 1차: "집합투자재산 관리회사" 문구 주변 (투자회사형 등에서 흔한 표현)
+  // 0차(최우선): 계약서 맨 끝 서명란.
+  //   신탁업자 서울특별시 중구 칠패로 37
+  //   홍콩상하이은행 서울지점
+  //   증권관리부서장
+  // "신탁업자"라는 단어는 본문 여러 곳(조항 제목, 정의 등)에 등장하지만, 서명란은 항상 계약서의
+  // 맨 마지막에 나오므로 "마지막으로 등장하는 위치"를 이용하면 사실상 오탐 없이 서명란만 잡을 수
+  // 있다. 서명란은 "신탁업자" 바로 뒤에 주소가 오고 그 다음 줄에 회사명이 오는 구조라 창(window)을
+  // 넉넉히(200자) 잡는다.
+  const lastTrusteeIdx = fcFindLastMatch(text, new RegExp(loosePattern("신탁업자")));
+  if (lastTrusteeIdx !== -1) {
+    const found0 = fcMatchOption(text.slice(lastTrusteeIdx, lastTrusteeIdx + 200), FC_TRUSTEE_OPTIONS);
+    if (found0) return found0;
+  }
+
+  // 1차: "신탁업자인 홍콩상하이은행 서울지점이 수행하여야 할 업무..." 처럼 제1조(목적) 조항에서
+  // "신탁업자인" 바로 뒤에 회사명이 붙어 나오는 경우. 기존 2차 패턴과 달리 "회사"라는 글자가
+  // 뒤따를 것을 요구하지 않는다 (은행명엔 "회사"라는 글자가 안 들어가는 경우가 대부분이라서).
+  const found1 = fcFindOptionNearMatches(
+    text,
+    new RegExp(loosePattern("신탁업자인")),
+    FC_TRUSTEE_OPTIONS,
+    40
+  );
+  if (found1) return found1;
+
+  // 2차(기존 1차 유지, 하위호환): "집합투자재산 관리회사" 문구 주변 (투자회사형 등에서 흔한 표현)
   // 참고: 헤딩과 회사명 사이에 줄바꿈이 끼는 경우가 많아 "."가 아니라 "[\s\S]"로 이어준다
   // (JS 정규식의 "."은 기본적으로 줄바꿈 문자를 건너뛰지 못함)
-  const found1 = fcFindOptionNearMatches(
+  const found2 = fcFindOptionNearMatches(
     text,
     new RegExp(loosePattern("집합투자재산") + "[\\s\\S]{0,15}" + loosePattern("관리회사")),
     FC_TRUSTEE_OPTIONS,
     400
   );
-  if (found1) return found1;
-  // 2차: "투자신탁재산 관리회사에 관한 사항(신탁업자)" 처럼 "신탁업자" 단어가 들어간 헤딩 주변
-  // (KB스타 한국 인덱스 투자설명서 등 투자신탁형 문서에서 쓰이는 표현)
+  if (found2) return found2;
+
+  // 3차(기존 2차 유지, 하위호환): "투자신탁재산 관리회사에 관한 사항(신탁업자)" 처럼 "신탁업자"
+  // 단어가 들어간 헤딩 주변 (KB스타 한국 인덱스 투자설명서 등 투자신탁형 문서에서 쓰이는 표현)
   return fcFindOptionNearMatches(
     text,
     new RegExp(loosePattern("신탁업자") + "[\\s\\S]{0,20}" + loosePattern("회사")),
@@ -497,6 +528,24 @@ function fcAutoExtractBizDayType() {
   return false;
 }
 
+// 수탁사(신탁업자)도 신탁계약서(집합투자규약서) 기준으로만 판단한다.
+// ⚠️ (2026-07-22 수정) 원래는 투자설명서(searchableText)에서 fcExtractTrustee를 돌렸는데,
+// 투자설명서엔 "신탁업자"라는 단어가 본문 곳곳(감시업무 조항 등)에 흩어져 나오고, 실제
+// 회사명은 "신탁회사/회사개요/회사명" 같은 다른 표제 구조로 적혀 있는 경우가 많아서
+// 엉뚱한 위치(예: 판매회사로 나온 다른 은행명)를 수탁사로 잘못 집어내는 사고가 있었음.
+// 신탁계약서는 "신탁업자인 OOO은행이 수행하여야 할 업무..." 처럼 정의 조항에 은행명이
+// 바로 붙어 나와 훨씬 안정적이므로, 수탁사는 신탁계약서가 있을 때만 신탁계약서 기준으로 판단한다.
+function fcAutoExtractTrustee() {
+  if (typeof trustDeedSearchableText === "undefined" || !trustDeedSearchableText) return false;
+  const trustee = fcExtractTrustee(trustDeedSearchableText);
+  if (trustee) {
+    fcSet("fund_trustee", trustee);
+    return true;
+  }
+  FC_STATE.fund_trustee = { value: "", found: false };
+  return false;
+}
+
 function fcAutoExtract() {
   if (typeof searchableText === "undefined" || !searchableText) return false;
   let didFind = false;
@@ -553,8 +602,8 @@ function fcAutoExtract() {
   // PB전용(PRIME)여부: 항상 아니오
   fcSet("fund_pb_prime", "아니오");
 
-  const trustee = fcExtractTrustee(searchableText);
-  if (trustee) { fcSet("fund_trustee", trustee); didFind = true; }
+  // 수탁사(신탁업자)는 투자설명서가 아니라 신탁계약서 기준으로 판단한다 (별도 진입점 fcAutoExtractTrustee).
+  if (fcAutoExtractTrustee()) didFind = true;
 
   const adminCompany = fcExtractAdminCompany(searchableText);
   if (adminCompany) { fcSet("fund_admin_company", adminCompany); didFind = true; }

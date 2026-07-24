@@ -346,6 +346,9 @@ async function handleTrustDeedFile(file) {
 
   // "펀드영업일구분"은 신탁계약서의 "영업일"이라 함은 ~ 정의 조항에서만 판단 가능
   runSafely(() => { if (typeof fcAutoExtractBizDayType === "function") fcAutoExtractBizDayType(); }, "펀드영업일구분 자동추출");
+  // 수탁사(신탁업자)는 투자설명서보다 신탁계약서(집합투자규약서)가 더 신뢰도 높은 소스임
+  // (투자설명서는 "신탁업자"/"판매회사" 등 여러 회사명이 뒤섞여 나와 오탐 위험이 큼).
+  runSafely(() => { if (typeof fcAutoExtractTrustee === "function") fcAutoExtractTrustee(); }, "수탁사 자동추출");
   runSafely(() => { if (typeof renderFundClass === "function") renderFundClass(); }, "펀드분류 렌더링");
 }
 
