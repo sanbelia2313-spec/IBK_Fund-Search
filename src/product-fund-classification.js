@@ -535,12 +535,37 @@ function fcAutoExtractBizDayType() {
 // 엉뚱한 위치(예: 판매회사로 나온 다른 은행명)를 수탁사로 잘못 집어내는 사고가 있었음.
 // 신탁계약서는 "신탁업자인 OOO은행이 수행하여야 할 업무..." 처럼 정의 조항에 은행명이
 // 바로 붙어 나와 훨씬 안정적이므로, 수탁사는 신탁계약서가 있을 때만 신탁계약서 기준으로 판단한다.
+// (2026-07-24 추가) 투자설명서(신탁계약서가 아예 없을 때의 대체 소스)의 표준 섹션
+// "제4부 ... N. 집합투자재산 관리에 관한 사항(신탁업자)" → "가. 회사의 개요" → "회사명 OOO"
+// 구조에서 회사명을 뽑는다. "회사명"이라는 라벨이 이 제4부 섹션 안에 여러 번(집합투자업자,
+// 일반사무관리회사, 채권평가회사 등) 나오므로, 반드시 "관리에 관한 사항(신탁업자)" 헤딩을
+// 먼저 찾고 그 헤딩 바로 다음에 나오는 "회사명"만을 대상으로 한다(다른 회사명과 섞이지 않게).
+function fcExtractTrusteeFromProspectus(text) {
+  const headingMatch = text.match(new RegExp(loosePattern("관리에 관한 사항") + "[\\s\\S]{0,10}" + loosePattern("신탁업자")));
+  if (!headingMatch) return null;
+  const afterHeading = text.slice(headingMatch.index + headingMatch[0].length, headingMatch.index + headingMatch[0].length + 200);
+  const nameLabelMatch = afterHeading.match(new RegExp(loosePattern("회사명")));
+  if (!nameLabelMatch) return null;
+  const from = nameLabelMatch.index + nameLabelMatch[0].length;
+  return fcMatchOption(afterHeading.slice(from, from + 60), FC_TRUSTEE_OPTIONS);
+}
+
 function fcAutoExtractTrustee() {
-  if (typeof trustDeedSearchableText === "undefined" || !trustDeedSearchableText) return false;
-  const trustee = fcExtractTrustee(trustDeedSearchableText);
-  if (trustee) {
-    fcSet("fund_trustee", trustee);
-    return true;
+  // 1순위: 신탁계약서(집합투자규약서)가 있으면 더 신뢰도 높은 소스이므로 우선 시도
+  if (typeof trustDeedSearchableText !== "undefined" && trustDeedSearchableText) {
+    const trustee = fcExtractTrustee(trustDeedSearchableText);
+    if (trustee) {
+      fcSet("fund_trustee", trustee);
+      return true;
+    }
+  }
+  // 2순위: 신탁계약서가 없거나 거기서 못 찾았으면 투자설명서에서 시도 (2026-07-24 추가)
+  if (typeof searchableText !== "undefined" && searchableText) {
+    const trustee = fcExtractTrusteeFromProspectus(searchableText);
+    if (trustee) {
+      fcSet("fund_trustee", trustee);
+      return true;
+    }
   }
   FC_STATE.fund_trustee = { value: "", found: false };
   return false;

@@ -55,6 +55,7 @@ const piFields = {
   manageFeeRate: $("#piManageFeeRate"),
   trusteeFeeRate: $("#piTrusteeFeeRate"),
   adminFeeRate: $("#piAdminFeeRate"),
+  frontLoadFee: $("#piFrontLoadFee"),
   syntheticFeeFundYn: $("#piSyntheticFeeFundYn"),
   syntheticFee: $("#piSyntheticFee"),
 };
@@ -335,6 +336,261 @@ function feeAnalyzeRegion(region, codesByLengthDesc, knownCodes) {
 
   return { parsed, commonTriple };
 }
+
+// ---------------------------------------------
+// 선취수수료 납입금액 — "나. 종류형 구조" 하위의 "이 투자신탁이 보유한 종류의 집합투자증권은
+// 아래와 같습니다" 표(종류/가입자격/선취판매/후취판매/환매/보수...)에서, 지금 선택된 클래스의
+// "선취판매" 칸 값을 그대로 가져옴 (예: "납입금액의 0.8%이내"). 위쪽 "보수율" 표(퍼센트 3~5개
+// 칸짜리)와는 완전히 다른 표라서 별도 파서로 둔다 — 저 표의 정교한 토큰 정렬 로직에 얹으려다
+// 기존 동작을 깨뜨릴 위험이 있어, 독립적이고 단순한 "코드~다음코드 사이 구간에서 정규식 검색"
+// 방식으로 구현함 (2026-07-24 추가).
+const FRONT_LOAD_TABLE_ANCHORS = [
+  "보유한 종류의 집합투자증권은 아래와",
+  "판매수수료가 다른 여러",
+  "선취판매 후취판매 환매",
+];
+const FRONT_LOAD_TABLE_WINDOW = 6000;
+
+function findFrontLoadFeeTableRegion() {
+  if (typeof searchableText === "undefined" || !searchableText) return null;
+  for (const anchor of FRONT_LOAD_TABLE_ANCHORS) {
+    const m = searchableText.match(new RegExp(loosePattern(anchor)));
+    if (m) return searchableText.slice(m.index, m.index + FRONT_LOAD_TABLE_WINDOW);
+  }
+  return null;
+}
+
+// 정규식 특수문자가 섞인 코드(예: "C-P")도 안전하게 리터럴로 이스케이프
+function escapeRegExpLiteral(s) {
+  return s.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+}
+
+// region 안에서 "줄 맨 앞에 코드가 단독으로 나오는" 위치를 찾음 (표의 "종류(클래스)" 열).
+// 본문 문장 속에 우연히 코드 문자열이 섞여 나오는 경우를 배제하기 위해, 코드 앞은 줄바꿈,
+// 뒤는 공백/줄바꿈이 오는 경우만 인정한다. 매치의 시작(줄 시작)과 끝(코드 바로 뒤, 즉 이
+// 클래스의 실제 셀 내용이 시작되는 지점)을 둘 다 돌려준다.
+function findClassCellStart(cleanedRegion, code, fromIndex) {
+  const re = new RegExp("(?:^|[\\n\\r])[ \\t]*" + escapeRegExpLiteral(code) + "(?=[ \\t\\n\\r])", "g");
+  re.lastIndex = fromIndex || 0;
+  const m = re.exec(cleanedRegion);
+  return m ? { lineStart: m.index, contentStart: m.index + m[0].length } : null;
+}
+
+// 지금 선택된 클래스(code)의 "선취판매" 칸 값을 찾아 반환.
+//
+// (2026-07-24 최초 구현 → 실제 앱 데이터로 재검증하며 재수정)
+// 처음엔 "납입금액의 0.8%이내"가 한 덩어리로(코드 뒤에) 붙어있다고 가정했는데, 실제 PDF
+// 추출 텍스트를 콘솔로 까보니 표 셀이 2줄로 줄바꿈되면서 "납입금액의"는 클래스 코드 줄
+// "바로 앞"에, "0.8%이내"는 코드 줄 "바로 뒤"에 떨어져서 나오는 문서도 있었다(코드 줄
+// 자체가 그 사이에 끼어있음):
+//   납입금액의
+//   A 수수료선취-오프라인 제한없음 - 0.350
+//   0.8%이내
+// PDF마다 추출 방식이 달라 어느 쪽으로 나올지 알 수 없으므로, 두 형태를 모두 시도한다.
+//   1) 코드 뒤(다음 코드 전까지)에서 "납입금액의 ~ 이내"가 (사이에 다른 텍스트가 약간
+//      끼어도) 잡히는지 먼저 시도 — 표 안쪽 잡음(각주 번호, 줄바꿈 등)에 대비해 사이 간격을
+//      좀 여유있게 허용한다. 어차피 "다음 클래스 코드가 나오기 전까지"로 엄격히 막혀 있어서
+//      다른 클래스 값을 잘못 끌어올 위험은 없다.
+//   2) 안 잡히면, 코드 "바로 앞"에 "납입금액의"가 있는지 확인하고(이 확인은 문자열
+//      맨 끝(`$`)에 고정되어 있어 얼마나 멀리서부터 보든 안전함) 있으면 코드 뒤에서
+//      "숫자%이내" 완성분만 찾아 합친다.
+//   둘 다 안 되면 이 클래스는 선취 대상이 아님(C/S 계열 등) → null(미입력)
+//
+// (참고: 처음엔 "표 전체에서 문구를 찾아 가장 가까운 코드에 붙이는" 훨씬 느슨한 3차
+// 안전망도 시도했었는데, 그 방식은 선취수수료가 없는 클래스(C/S 계열)에도 옆 클래스의
+// 값이 잘못 붙는 오탐이 실제로 확인되어 제외함 — 대신 아래처럼 "이 클래스 고유의 안전한
+// 경계(afterBlock/코드 직전 위치) 안에서 허용 간격만 넉넉하게 넓히는" 방식으로 대체함.
+// 이 방식은 클래스 경계를 절대 넘지 않아서 오탐 위험 없이 안전망 역할을 한다.)
+// (2026-07-24 추가) 한화 투자설명서로 검증하며 발견한 두 가지 추가 변형:
+//   - "0.5%이내"가 아니라 "0.5% 이하"라고 쓰는 문서가 있음
+//   - A클래스처럼 아예 "이내/이하" 같은 말 없이 그냥 "1.0%"만 쓰는 경우도 있음
+// 그래서 1)/2)의 접미사 부분을 "이내" 고정이 아니라 "(이내|이하)?"로 느슨하게 바꿈.
+const FRONT_LOAD_SUFFIX = "(?:\\s*(?:이내|이하))?";
+
+// (2026-07-24 추가) 3차 안전망: "종류형 구조" 표 자체에 실제 수치가 없고(설명 문구만 있고),
+// 대신 법정 표준 섹션인 "13. 보수 및 수수료에 관한 사항 > 가. 투자자에게 직접 부과되는
+// 수수료" 표에만 실제 수치가 있는 문서(한화 등)를 위한 것. 이 표는 "납입금액의" 접두어가
+// 전혀 없이 "수수료선취-오프라인(A)    1.0%    -    -    -" 처럼 클래스명(코드) 바로 뒤에
+// 선취판매수수료가 옴. 위 1)/2)와 완전히 다른 표라 별도 앵커/파서로 둔다.
+const DIRECT_FEE_TABLE_ANCHORS = ["투자자에게 직접 부과되는 수수료"];
+const DIRECT_FEE_TABLE_WINDOW = 4000;
+
+function findDirectFeeTableRegion() {
+  if (typeof searchableText === "undefined" || !searchableText) return null;
+  for (const anchor of DIRECT_FEE_TABLE_ANCHORS) {
+    const m = searchableText.match(new RegExp(loosePattern(anchor)));
+    if (m) return stripPageArtifacts(searchableText.slice(m.index, m.index + DIRECT_FEE_TABLE_WINDOW));
+  }
+  return null;
+}
+
+// 공통 로직(1/2번) — "코드가 줄 맨 앞에 단독으로 나오고, 그 앞/뒤 어딘가에 '납입금액의 N%'가
+// 딸려나오는" 표 레이아웃이면 어떤 표(region)에든 적용 가능하도록 분리함 (2026-07-24 리팩터링).
+// 원래는 findFrontLoadFeeTableRegion()이 찾은 "종류형 구조" 표에만 쓰였는데, KCGI 등 일부
+// 문서는 "13. 가. 투자자에게 직접 부과되는 수수료" 표조차 "(A)"처럼 괄호로 코드를 감싸지 않고
+// "A"를 그냥 단독 줄로 뽑아내면서, 값도 코드 줄 앞/뒤로 떨어져 나오는 "종류형 구조"와 똑같은
+// 레이아웃이라, 기존의 괄호 전용 파서(computeFrontLoadFeeFromDirectTable)로는 못 잡았음.
+function tryExtractFrontLoadFromRegion(cleaned, code) {
+  const startHit = findClassCellStart(cleaned, code, 0);
+  if (!startHit) return null;
+
+  const activeCodes = (typeof getActiveClassTable === "function")
+    ? Array.from(new Set(getActiveClassTable().map(e => e.code)))
+    : [];
+  const startIdx = startHit.contentStart;
+  let endIdx = Math.min(cleaned.length, startIdx + 400);
+  activeCodes
+    .filter(c => c && c !== code)
+    .forEach(other => {
+      const otherHit = findClassCellStart(cleaned, other, startIdx);
+      if (otherHit && otherHit.lineStart > startIdx && otherHit.lineStart < endIdx) {
+        endIdx = otherHit.lineStart;
+      }
+    });
+  const afterBlock = cleaned.slice(startIdx, endIdx);
+
+  // 1) 코드 뒤(=다음 클래스 코드 전까지, 절대 안 넘어감)에서 "납입금액의 ~ (이내/이하/없음)"를
+  // 찾음. 사이에 약간의 잡음(각주표시, 줄바꿈 등)이 끼어도 잡히도록 간격을 30자까지 허용.
+  const combinedRe = new RegExp("납입금액의[\\s\\S]{0,30}?([0-9]+(?:\\.[0-9]+)?)\\s*%" + FRONT_LOAD_SUFFIX);
+  const combined = afterBlock.match(combinedRe);
+  if (combined) return "납입금액의 " + combined[1] + "%" + (combined[0].includes("이내") ? "이내" : "");
+
+  // 2) 코드 "바로 앞"에 "납입금액의"가 떨어져 나오는 형태. 문자열 끝(`$`)에 고정된 검사라
+  // 창을 넉넉히(150자) 잡아도 다른 행 내용과 혼동될 위험이 없음(중간에 다른 텍스트가
+  // 있어도 "바로 앞"이 "납입금액의"가 아니면 그냥 매치 실패로 끝나기 때문).
+  const beforeText = cleaned.slice(Math.max(0, startHit.lineStart - 150), startHit.lineStart);
+  if (/납입금액의\s*$/.test(beforeText)) {
+    const feeRe = new RegExp("([0-9]+(?:\\.[0-9]+)?)\\s*%" + FRONT_LOAD_SUFFIX);
+    const feeMatch = afterBlock.match(feeRe);
+    if (feeMatch) return "납입금액의 " + feeMatch[1] + "%" + (feeMatch[0].includes("이내") ? "이내" : "");
+  }
+
+  // 3) "납입금액"과 "의"가 클래스 코드 자체를 사이에 두고 쪼개져 나오는 경우 (KCGI 등에서 확인,
+  // 2026-07-24 추가). 예: "...판매수수료가 징구되며, 판    납입금액 / Ae    온라인    ...전용
+  // 의 0.35%    -    -    -" — "납입금액"은 코드 줄 바로 앞에서 끝나고, "의 N%"는 코드 뒤
+  // afterBlock 안 어딘가(같은 줄 다른 칸일 수 있음)에 등장한다. "의" 하나만 보면 "회사의"처럼
+  // 무관한 조사와 혼동될 수 있으므로, 반드시 "의" 바로 뒤에 숫자+%가 붙어있는 경우만 인정한다.
+  if (/납입금액\s*$/.test(beforeText)) {
+    const feeRe2 = new RegExp("의\\s*([0-9]+(?:\\.[0-9]+)?)\\s*%" + FRONT_LOAD_SUFFIX);
+    const feeMatch2 = afterBlock.match(feeRe2);
+    if (feeMatch2) return "납입금액의 " + feeMatch2[1] + "%" + (feeMatch2[0].includes("이내") ? "이내" : "");
+  }
+  return null;
+}
+
+// "(코드)" 바로 뒤에 오는 값 한 칸만 본다 — 그 칸이 "-"면 선취 대상이 아님(null), 숫자%면
+// 그 값을 반환. "이내"/"이하"가 붙어 있으면 그대로 살리고, 없으면 안 붙인다.
+function computeFrontLoadFeeFromDirectTable(code) {
+  const region = findDirectFeeTableRegion();
+  if (!region) return null;
+  const codeMarker = "(" + code + ")";
+  const idx = region.indexOf(codeMarker);
+  if (idx !== -1) {
+    const after = region.slice(idx + codeMarker.length, idx + codeMarker.length + 40);
+    const m = after.match(/^\s*(-|[0-9]+(?:\.[0-9]+)?\s*%(?:\s*(?:이내|이하))?)/);
+    if (m && m[1] !== "-") {
+      const num = m[1].match(/[0-9]+(?:\.[0-9]+)?/)[0];
+      return "납입금액의 " + num + "%" + (/이내/.test(m[1]) ? "이내" : "");
+    }
+    if (m) return null; // "-"로 명시적으로 확인된 경우만 여기서 "선취 대상 아님"으로 확정
+  }
+
+  // (2026-07-24 추가) KCGI 등 일부 문서는 이 표에서도 코드를 괄호 없이 "A"처럼 단독 줄로
+  // 뽑아내고, 값("0.7%이내")은 코드 줄 앞/뒤로 떨어져 나온다(종류형 구조 표와 동일 레이아웃).
+  // → 괄호 매칭이 실패하면 같은 region에 대해 공통 파서로 한 번 더 시도.
+  const cleaned = stripPageArtifacts(region);
+  return tryExtractFrontLoadFromRegion(cleaned, code);
+}
+
+function computeFrontLoadFeeValue(code) {
+  if (!code) return null;
+
+  // 1)/2): "종류형 구조" 계열 표(코드가 줄 맨 앞에 단독으로 나오는 표)에서 시도.
+  // 이 표 자체가 없거나(region 없음) 이 표에 코드가 단독으로 안 나오는 경우(예: "선취(A)"처럼
+  // 코드가 다른 글자에 바로 붙어 나오는 설명형 표)에는 조용히 다음 단계(3차)로 넘어간다.
+  const region = findFrontLoadFeeTableRegion();
+  if (region) {
+    const cleaned = stripPageArtifacts(region);
+    const val = tryExtractFrontLoadFromRegion(cleaned, code);
+    if (val) return val;
+  }
+
+  // 3) 1)/2) 둘 다 실패한 경우(예: "종류형 구조" 표엔 수치가 없고 법정 표준 섹션인
+  // "13. 보수 및 수수료에 관한 사항 > 가. 투자자에게 직접 부과되는 수수료" 표에만 수치가
+  // 있는 문서) — 괄호 형식("(A)") 또는 코드 단독 줄 형식 둘 다 재시도
+  return computeFrontLoadFeeFromDirectTable(code);
+}
+
+function refreshFrontLoadFeeField() {
+  if (!piFields.frontLoadFee) return;
+  const resolvedCode = getResolvedClassCode();
+  piFields.frontLoadFee.classList.remove("auto-filled", "suggested", "none-found");
+  if (!resolvedCode) {
+    piFields.frontLoadFee.value = "";
+    piFields.frontLoadFee.classList.add("none-found");
+    return;
+  }
+  const val = computeFrontLoadFeeValue(resolvedCode);
+  if (val) {
+    piFields.frontLoadFee.value = val;
+    piFields.frontLoadFee.classList.add("auto-filled");
+  } else {
+    // 선취(A 계열 등) 클래스가 아니거나 표에서 못 찾은 경우 → 미입력
+    piFields.frontLoadFee.value = "";
+    piFields.frontLoadFee.classList.add("none-found");
+  }
+}
+
+// 콘솔 디버그용: 개발자도구(F12)에서 frontLoadFeeDebugDump() 실행하면
+// 앵커를 찾았는지, 어떤 앵커로 찾았는지, 지금 선택된 클래스가 표에서 어디부터 어디까지로
+// 잘렸는지, 그 구간 원문이 정확히 무엇인지를 그대로 출력함. "미입력"으로 나올 때 원인 확인용.
+function frontLoadFeeDebugDump() {
+  const resolvedCode = getResolvedClassCode();
+  console.log("[선취수수료] 현재 선택된 클래스코드(getResolvedClassCode):", resolvedCode);
+
+  if (typeof searchableText === "undefined" || !searchableText) {
+    console.log("[선취수수료] searchableText가 없음 (파일이 아직 안 올라간 상태?)");
+    return;
+  }
+
+  let usedAnchor = null, anchorIdx = -1;
+  for (const anchor of FRONT_LOAD_TABLE_ANCHORS) {
+    const m = searchableText.match(new RegExp(loosePattern(anchor)));
+    if (m) { usedAnchor = anchor; anchorIdx = m.index; break; }
+  }
+  console.log("[선취수수료] 매치된 앵커:", usedAnchor, "위치:", anchorIdx);
+  if (!usedAnchor) {
+    console.log("[선취수수료] 앵커 3종 모두 못 찾음 → 표 자체를 못 찾은 상태.");
+    console.log("[선취수수료] FRONT_LOAD_TABLE_ANCHORS:", FRONT_LOAD_TABLE_ANCHORS);
+    return;
+  }
+
+  const region = searchableText.slice(anchorIdx, anchorIdx + FRONT_LOAD_TABLE_WINDOW);
+  const cleaned = stripPageArtifacts(region);
+  console.log("[선취수수료] 표 영역(정리 후) 앞부분 500자:\n", cleaned.slice(0, 500));
+
+  if (!resolvedCode) {
+    console.log("[선취수수료] 클래스가 특정되지 않아 여기서 중단 (1~3차 클래스구분을 먼저 선택해야 함)");
+    return;
+  }
+
+  const startHit = findClassCellStart(cleaned, resolvedCode, 0);
+  console.log("[선취수수료] 클래스 '" + resolvedCode + "' 셀 시작 위치(findClassCellStart):", startHit);
+  if (!startHit) {
+    console.log("[선취수수료] → 표 영역 안에서 '" + resolvedCode + "'가 줄 맨 앞 단독으로 등장하는 곳을 못 찾음.");
+    console.log("[선취수수료] 표 영역 전체(정리 후):\n", cleaned);
+    return;
+  }
+
+  const beforeText = cleaned.slice(Math.max(0, startHit.lineStart - 150), startHit.lineStart);
+  console.log("[선취수수료] 코드 줄 바로 앞 60자(\"납입금액의\" 있어야 선취 대상):", JSON.stringify(beforeText));
+  console.log("[선취수수료] → 선취 대상 판정:", /납입금액의\s*$/.test(beforeText));
+
+  const val = computeFrontLoadFeeValue(resolvedCode);
+  console.log("[선취수수료] computeFrontLoadFeeValue 최종 결과:", val);
+  return { resolvedCode, usedAnchor, region: cleaned, startHit, beforeText, val };
+}
+window.frontLoadFeeDebugDump = frontLoadFeeDebugDump;
 
 function findFeeTableRegion() {
   if (typeof searchableText === "undefined" || !searchableText) return null;
@@ -1278,6 +1534,10 @@ function refreshIndividualInfo() {
   // 5) 보수율 자동기입칸 — 투자설명서 보수 표에서 현재 클래스에 맞는 행을 찾아 채움
   refreshFeeRateFields();
 
+  // 5-1) 선취수수료 납입금액 — "종류형 구조" 표의 선취판매 칸에서 현재 클래스에 맞는 값을 찾아 채움
+  //      (A 계열처럼 선취수수료가 있는 클래스가 아니면 미입력으로 남김)
+  refreshFrontLoadFeeField();
+
   // 6) 수수료징수방법 — 클래스구분(19종) 기준
   refreshFeeCollectMethod();
 
@@ -1325,6 +1585,7 @@ function refreshIndividualInfo() {
   piFields.isaTrust, piFields.isaDiscretionary,
   piFields.dealerTransfer, piFields.ratioTransfer, piFields.tabletBanking,
   piFields.totalFee, piFields.saleFeeRate, piFields.manageFeeRate, piFields.trusteeFeeRate, piFields.adminFeeRate,
+  piFields.frontLoadFee,
   piFields.syntheticFeeFundYn, piFields.syntheticFee,
 ].forEach(el => {
   if (!el) return;
@@ -1352,6 +1613,7 @@ if (piFields.classDivision) {
   piFields.classDivision.addEventListener("change", () => {
     applyInternetBankingFromClass("suggested");
     refreshFeeRateFields();
+    refreshFrontLoadFeeField();
     refreshFeeCollectMethod();
     refreshCpDerivedFields();
     refreshAccountOpenability();

@@ -622,3 +622,87 @@ function autoFillItem(item, silent) {
 // ---------------------------------------------
 // 7. (등록 항목 UI는 제거됨 — manager/risk_grade는 PDF 업로드 시 자동으로만 채워짐)
 // ---------------------------------------------
+
+// ---------------------------------------------
+// 8. 입력칸 자동폭조정(autosize) — "상품개별정보" 등 ci-flatrow 안의 텍스트 입력칸들은
+// CSS에서 정한 고정폭(78px/ci-wide 130px/ci-xwide 260px 등)보다 실제 값이 길면 글자가
+// 잘려 보이는 문제가 있었음. 값 길이에 딱 맞게 폭을 늘려주되, CSS가 정한 기본폭보다
+// 작아지지는 않게(짧은 값일 때 너무 좁아 보이지 않도록) 한다. (2026-07-24 추가)
+//
+// 적용 대상: .ci-flat-field 안의 텍스트 입력칸 전체(선취수수료 납입금액/전환그룹코드(명)
+// 뿐 아니라 앞으로 추가되는 필드도 자동으로 포함됨 — 특정 id를 안 타고 구조로 잡음).
+//
+// 프로그램이 .value를 직접 대입하는 곳(자동채움 함수들)을 일일이 다 찾아 후처리를
+// 붙이는 대신, 이 코드베이스의 공통 패턴 — 값을 바꾼 직후 항상
+// classList.add("auto-filled"/"suggested"/"none-found")를 호출한다는 점 — 을 이용해서
+// class 속성이 바뀌는 순간을 MutationObserver로 감지해 자동폭조정을 실행한다.
+// 이렇게 하면 기존 자동채움 함수들을 하나도 안 고쳐도 전부 적용된다.
+const autosizeMeasureCanvas = document.createElement("canvas");
+const autosizeMeasureCtx = autosizeMeasureCanvas.getContext("2d");
+
+function autosizeMeasureTextWidth(text, font) {
+  autosizeMeasureCtx.font = font;
+  return autosizeMeasureCtx.measureText(text || "").width;
+}
+
+// CSS가 정해준 원래 폭(=최소폭)을 딱 한 번만 기억해둠. 이후 값이 짧아져도 이 밑으로는
+// 안 줄어들게(다시 좁아지면 레이아웃이 들썩여 보임을 방지).
+function autosizeBaseWidth(el) {
+  if (el.dataset.autosizeBase === undefined) {
+    const rectWidth = el.getBoundingClientRect().width;
+    el.dataset.autosizeBase = String(rectWidth || parseFloat(getComputedStyle(el).width) || 78);
+  }
+  return parseFloat(el.dataset.autosizeBase);
+}
+
+function autosizeInput(el) {
+  if (!el || el.tagName !== "INPUT" || el.type !== "text") return;
+  if (!el.classList.contains("ci-flat-autosize-managed")) {
+    el.classList.add("ci-flat-autosize-managed");
+  }
+  const base = autosizeBaseWidth(el);
+  const cs = getComputedStyle(el);
+  const font = [cs.fontStyle, cs.fontWeight, cs.fontSize, cs.fontFamily].join(" ");
+  const text = el.value || el.getAttribute("placeholder") || "";
+  const textWidth = autosizeMeasureTextWidth(text, font);
+  const extra =
+    (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) +
+    (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.borderRightWidth) || 0) +
+    8; // 커서/여유 공간
+  const needed = Math.ceil(textWidth + extra);
+  el.style.width = Math.max(base, needed) + "px";
+}
+
+const AUTOSIZE_SELECTOR = '.ci-flat-field input[type="text"]';
+
+function autosizeAll() {
+  document.querySelectorAll(AUTOSIZE_SELECTOR).forEach(autosizeInput);
+}
+
+// 1) 처음 로드 시 한 번 전부 맞춤 (기본값/placeholder 기준)
+autosizeAll();
+
+// 2) 사용자가 직접 타이핑할 때 실시간으로 맞춤
+document.addEventListener("input", (e) => {
+  if (e.target && e.target.matches && e.target.matches(AUTOSIZE_SELECTOR)) {
+    autosizeInput(e.target);
+  }
+});
+
+// 3) 자동채움 함수들이 값을 바꾼 뒤 class를 바꾸는 시점을 감지해서 맞춤
+//    (거의 모든 자동채움 함수가 el.value=...; el.classList.add(...) 순서로 동작하므로,
+//    class 속성 변경 시점엔 값이 이미 최종 상태로 반영돼 있어 안전함)
+const autosizeObserver = new MutationObserver((mutations) => {
+  const targets = new Set();
+  mutations.forEach((m) => {
+    if (m.target && m.target.matches && m.target.matches(AUTOSIZE_SELECTOR)) {
+      targets.add(m.target);
+    }
+  });
+  targets.forEach(autosizeInput);
+});
+autosizeObserver.observe(document.body, {
+  attributes: true,
+  attributeFilter: ["class"],
+  subtree: true,
+});
