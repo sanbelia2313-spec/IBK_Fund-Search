@@ -43,7 +43,7 @@ function renderClassCheckTable(company, selectedCode, overrideTable) {
 
   table.innerHTML = `
     <thead>
-      <tr><th>코드</th><th>1차</th><th>2차</th><th>3차</th><th>펀드코드</th></tr>
+      <tr><th>코드</th><th>1차</th><th>2차</th><th>3차</th><th>단축코드</th></tr>
     </thead>
     <tbody>${rows}</tbody>
   `;
