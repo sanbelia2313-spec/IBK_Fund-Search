@@ -49,10 +49,40 @@ function cleanFundCharParagraph(str) {
 // 나머지 줄을 순서대로 이어붙여야 원래 문단이 복원된다(2026-07-22, KCGI 실제 데이터로 확인).
 function findInvestStrategyFromSummaryBox(text) {
   if (!text) return null;
-  const boxAnchorRe = new RegExp(loosePattern("[요약정보]"));
-  const boxMatch = text.match(boxAnchorRe);
+  // ⚠ (2026-07-29 수정) "요약정보" 문구는 문서 안에 여러 번 나올 수 있다: (1) 페이지 상단의
+  // 큰 장식용 제목(예: "[요 약 정 보]" — 글자 사이 간격을 둔 헤딩), (2) 본문 최상단 안내문
+  // ("이 요약정보는 ~~~ 담고 있습니다."), (3) 실제 "투자목적 및 투자전략" 표 바로 위에 붙는
+  // 작은 섹션 라벨(운용사에 따라 "[요약정보]", "■ 요약정보" 등 표기가 다름). 예전 코드는
+  // text.match()로 "가장 먼저 나오는" 매칭 하나만 썼는데, 이게 (1)/(2)번에 걸리면 그 사이에
+  // 낀 표지 문구까지 결과에 통째로 딸려 들어오는 문제가 있었다(교보악사 파워인덱스 실제
+  // 데이터로 확인). → "요약정보" 매칭을 전부 찾은 뒤, 그중 "투자목적" 라벨이 가장 가까이
+  // (바로 뒤에) 붙어있는 매칭을 골라서 진짜 표 위치를 앵커로 삼는다.
+  // ⚠ (2026-07-29 재수정) 앵커 패턴에 대괄호("[요약정보]")를 필수로 넣었었는데, KB자산운용
+  // 문서들은 대괄호 없이 "■ 요약정보"(네모 불릿) 형태를 쓴다. 대괄호가 없다는 이유만으로
+  // 앵커를 아예 못 찾아 폴백(본문 9번 항목)으로 새는 문제가 있었음(KB스타 미국 나스닥 100
+  // 인덱스 등 실제 데이터로 확인). → 앞에 어떤 기호(■, [, □ 등)가 붙든 상관없이 "요약정보"
+  // 라는 글자 자체만 앵커로 찾는다.
+  const boxAnchorRe = new RegExp(loosePattern("요약정보"), "g");
+  const targetRe = new RegExp(loosePattern("투자목적"));
+  let boxMatch = null;
+  let bestGap = Infinity;
+  let m;
+  while ((m = boxAnchorRe.exec(text)) !== null) {
+    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 200);
+    const targetMatch = after.match(targetRe);
+    if (targetMatch && targetMatch.index < bestGap) {
+      bestGap = targetMatch.index;
+      boxMatch = m;
+    }
+    if (m[0].length === 0) boxAnchorRe.lastIndex++; // 빈 매칭 무한루프 방지
+  }
   if (!boxMatch) return null;
-  const boxStart = boxMatch.index + boxMatch[0].length;
+  let boxStart = boxMatch.index + boxMatch[0].length;
+  // "요약정보" 앵커가 원래 "[요약정보]"처럼 대괄호로 감싸져 있던 경우, 여는 대괄호는 앵커 매칭
+  // 이전(문서 원문)에 있으므로 상관없지만, 닫는 대괄호 "]"는 매칭 바로 뒤에 그대로 남아 결과
+  // 맨 앞에 "]"가 붙어나오는 문제가 있었다(대괄호 요구조건을 없앤 부작용, 2026-07-29 확인).
+  // → 앵커 뒤에 곧바로 오는 닫는 괄호류 문자는 건너뛴다.
+  while (boxStart < text.length && /[\])】》」』]/.test(text[boxStart])) boxStart++;
 
   const windowText = text.slice(boxStart, boxStart + 2000);
   // 이 표에 "투자목적" 라벨 자체가 없으면(운용사마다 요약정보 구성이 다를 수 있음) 폴백으로 넘김
@@ -68,10 +98,29 @@ function findInvestStrategyFromSummaryBox(text) {
   // 딸려 들어오는 문제가 있었음(모자형 펀드 문서에서 흔함). 원래 규칙(요약정보는 "비교지수"
   // 언급 직전까지만)대로, "비교지수" 또는 "[위험관리]" 헤딩 중 더 먼저 나오는 지점에서 추가로
   // 한 번 더 잘라낸다.
-  const compareIdxMatch = rawSpan.match(new RegExp(loosePattern("비교지수")));
+  //
+  // ⚠ (2026-07-29 재수정) "비교지수"라는 단어가 나오기만 하면 무조건 섹션 전환으로 보고 잘라내면
+  // 안 된다. "...종목선정을 통해 비교지수 대비 초과수익을 추구합니다." 처럼, 투자목적 문장 자체
+  // 안에서 "비교지수"라는 단어가 자연스럽게 쓰이는 경우가 실제로 있다(한화글로벌헬스케어 실제
+  // 데이터로 확인 — 이 경우 뒤에 이어지는 "비교지수 대비 초과수익을 추구합니다." 부분이 통째로
+  // 잘려나가는 문제가 있었음). 반면 정말 별도 섹션(벤치마크 정의문)으로 넘어가는 경우는
+  // "비교지수(Benchmark): ..." 처럼 "비교지수" 바로 뒤에 콜론(:)이나 괄호가 따라붙는 형태로만
+  // 나타난다. → "비교지수" 뒤에 (공백 제외) 콜론/괄호가 바로 오는 경우만 섹션 전환으로 간주하고,
+  // 문장 중간에 자연스럽게 쓰인 경우는 무시한다.
+  function findCompareIdxHeading(str) {
+    const re = new RegExp(loosePattern("비교지수"), "g");
+    let mm;
+    while ((mm = re.exec(str)) !== null) {
+      const after = str.slice(mm.index + mm[0].length, mm.index + mm[0].length + 6);
+      if (/^\s*[:：(（]/.test(after)) return mm.index;
+      if (mm[0].length === 0) re.lastIndex++; // 빈 매칭 무한루프 방지
+    }
+    return -1;
+  }
+  const compareIdx = findCompareIdxHeading(rawSpan);
   const riskHeadingMatch = rawSpan.match(new RegExp(loosePattern("[위험관리]")));
   const cutCandidates = [];
-  if (compareIdxMatch) cutCandidates.push(compareIdxMatch.index);
+  if (compareIdx !== -1) cutCandidates.push(compareIdx);
   if (riskHeadingMatch) cutCandidates.push(riskHeadingMatch.index);
   if (cutCandidates.length) {
     let cutAt = Math.min(...cutCandidates);
@@ -211,7 +260,14 @@ function fundCharAutoExtract() {
   if (typeof searchableText === "undefined" || !searchableText) return false;
   let didFind = false;
 
-  const summary = findInvestStrategyFromSummaryBox(searchableText) || findInvestStrategySummary(searchableText);
+  // ⚠ (2026-07-29 수정) 예전에는 요약정보 표에서 못 찾으면(findInvestStrategyFromSummaryBox가
+  // null) 본문 "9. 집합투자기구의 투자전략..." 섹션(findInvestStrategySummary)에서 대신
+  // 가져오는 폴백이 있었음. 그런데 이 필드는 항상 "[요약정보]" 표의 "투자목적 및 투자전략" 행
+  // 에서만 가져와야 하는 필드라서, 문서에 따라 표에서 가져오기도 하고 본문에서 가져오기도
+  // 하면 내용의 출처/형식이 뒤죽박죽 섞여버리는 문제가 있었다(KB스타 미국 S&P500 인덱스 등
+  // 실제 사례로 확인). → 본문 폴백을 제거하고, 요약정보 표에서 못 찾으면 빈 칸으로 두어
+  // 사용자가 직접 확인하도록 한다(잘못된 다른 섹션 내용이 조용히 채워지는 것보다 안전함).
+  const summary = findInvestStrategyFromSummaryBox(searchableText);
   piFundCharFields.summaryInfo.classList.remove("auto-filled", "none-found");
   if (summary) {
     piFundCharFields.summaryInfo.value = summary;
