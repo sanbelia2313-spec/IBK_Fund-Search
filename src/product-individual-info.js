@@ -1436,13 +1436,24 @@ function refreshIsaFields() {
 }
 
 // 판매사이동가능여부/비율이체가능여부 — 일반펀드면 예/예, 연금클래스(3차명에 "연금" 포함)·CW면 아니오/예.
-// 태블릿뱅킹 신규가능여부 — 위 두 개와는 별개로, 클래스구분이 A 계열이나 C 계열이면 예, 아니면 아니오.
+// 태블릿뱅킹 신규가능여부 — 위 두 개와는 별개로, 클래스구분이 "A", "C", "C1" 이 셋 중 하나일 때만 예,
+// 그 외(A-E, A-U, A-G, C2, C3, C4, C5, CW, C-P2 등 A/C로 "시작"만 하는 나머지 파생 클래스 전부 포함)는 아니오.
+// (2026-07-29 추가) C1까지는 예, C2부터는 다시 아니오로 확정.
+// ⚠️ 이전 버전은 codePart의 첫 글자만 비교해서 A-E/C1 같은 파생 클래스까지 잘못 "예"로 처리했음.
+// ⚠️ (2026-07-29 재수정) "클래스구분" 드롭다운은 사내 표준 19종으로만 구성돼 있어, C-P2(퇴직연금)처럼
+// 표준 목록에 아예 없는 코드는 매핑에 실패해 classDivision 값 자체가 빈 값("미입력")으로 남는다.
+// 그러면 태블릿뱅킹도 판단 근거가 없어져 "미입력"으로 같이 비어버렸음 — 정작 C-P2는 "A/C/C1 딱 그
+// 자체"가 아니므로 명백히 "아니오"가 나와야 하는 케이스. 그래서 classDivision이 비어있을 때는
+// 표준화되지 않은 원본 코드(getResolvedClassCode, 예: "C-P2")로 한 번 더 판단해서 폴백한다.
+const TABLET_BANKING_ALLOWED_CLASSES = new Set(["A", "C", "C1"]);
 function computeTabletBanking() {
-  const cls = piFields.classDivision.value;
+  let cls = piFields.classDivision.value;
+  if (!cls && typeof getResolvedClassCode === "function") {
+    cls = getResolvedClassCode(); // 표준 클래스로 매핑 안 되는 원본 코드(예: "C-P2")로 폴백
+  }
   if (!cls) return "";
-  const codePart = cls.replace(/\s*Class$/, "");
-  const firstChar = codePart.charAt(0).toUpperCase();
-  return (firstChar === "A" || firstChar === "C") ? "예" : "아니오";
+  const codePart = cls.replace(/\s*Class$/, "").trim().toUpperCase();
+  return TABLET_BANKING_ALLOWED_CLASSES.has(codePart) ? "예" : "아니오";
 }
 function refreshDealerTransferFields() {
   if (!hasProductBasis()) {

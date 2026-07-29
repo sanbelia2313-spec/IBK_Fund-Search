@@ -61,15 +61,49 @@ function findInvestStrategyFromSummaryBox(text) {
   // 종료 지점: 다음 행 라벨("분 류"/"분류" — 거의 모든 투자설명서 요약정보에 있는 표준 행) 직전까지.
   // 못 찾으면 안전하게 윈도우 전체(2000자)로 제한해서 과도한 오검출을 막음.
   const nextRowMatch = windowText.match(new RegExp(loosePattern("분") + "\\s*" + loosePattern("류")));
-  const rawSpan = nextRowMatch ? windowText.slice(0, nextRowMatch.index) : windowText;
+  let rawSpan = nextRowMatch ? windowText.slice(0, nextRowMatch.index) : windowText;
 
-  // 라벨만 단독으로 있는 줄(공백 제거 후 "투자목적"/"및"/"투자전략"/이들의 조합과 정확히
-  // 일치하는 줄)은 버리고, 본문이 섞여있는 줄만 순서대로 남겨서 이어붙임.
-  const LABEL_ONLY_LINES = new Set(["투자목적", "및", "투자전략", "투자목적및", "및투자전략", "투자목적및투자전략"]);
-  const kept = rawSpan.split("\n").filter(line => {
-    const compact = line.replace(/\s+/g, "");
-    return compact && !LABEL_ONLY_LINES.has(compact);
-  });
+  // ⚠ (2026-07-29 수정) "분류" 라벨 직전까지만 자르면, 그 사이에 있는 "모투자신탁의 투자목적 및
+  // 전략" 뒤에 이어지는 "* 비교지수(Benchmark): ..." 설명과 "[위험관리]" 문단까지 전부 같이
+  // 딸려 들어오는 문제가 있었음(모자형 펀드 문서에서 흔함). 원래 규칙(요약정보는 "비교지수"
+  // 언급 직전까지만)대로, "비교지수" 또는 "[위험관리]" 헤딩 중 더 먼저 나오는 지점에서 추가로
+  // 한 번 더 잘라낸다.
+  const compareIdxMatch = rawSpan.match(new RegExp(loosePattern("비교지수")));
+  const riskHeadingMatch = rawSpan.match(new RegExp(loosePattern("[위험관리]")));
+  const cutCandidates = [];
+  if (compareIdxMatch) cutCandidates.push(compareIdxMatch.index);
+  if (riskHeadingMatch) cutCandidates.push(riskHeadingMatch.index);
+  if (cutCandidates.length) {
+    let cutAt = Math.min(...cutCandidates);
+    // "* 비교지수..." 처럼 글머리 기호(*, ※ 등)가 바로 앞에 붙는 경우가 많아, 그 기호까지
+    // 함께 잘라내서 요약문 끝에 외따로 기호만 남는 것을 방지
+    const before = rawSpan.slice(Math.max(0, cutAt - 5), cutAt);
+    const markerMatch = before.match(/[*※]\s*$/);
+    if (markerMatch) cutAt -= markerMatch[0].length;
+    rawSpan = rawSpan.slice(0, cutAt);
+  }
+
+  // ⚠ (2026-07-29 재수정) PDF 좌표 재구성 특성상 라벨 단어("모투자신탁의"/"투자목적"/"및"/
+  // "전략"/"투자전략")가 줄 전체를 혼자 차지하는 게 아니라, 본문 줄의 맨 앞이나 맨 뒤에
+  // 섞여 붙는 경우가 많다(예: "모투자신탁의 국내 주식 중 IT...", "...투자목적 및 전략
+  // 투자대상으로 하여...", 문장 끝에 남는 "및 전략" 등). 줄 전체가 라벨과 정확히 일치할
+  // 때만 버리는 방식으로는 이런 줄들을 걸러내지 못해 라벨 파편이 본문 앞뒤에 그대로
+  // 끼어드는 문제가 있었음. 그래서 줄 전체를 보는 대신, 각 줄의 맨 앞/맨 뒤에서부터
+  // 라벨 어휘에 정확히 일치하는 "토큰"만 하나씩 벗겨내고 가운데 남은 본문만 사용한다.
+  // (참고: "[모투자신탁의 투자목적 및 투자전략]" 같은 대괄호 헤딩은 첫 토큰이 "[모투자신탁의"로
+  // 라벨 어휘와 정확히 일치하지 않으므로 그대로 보존된다.)
+  const LABEL_TOKENS = new Set(["모투자신탁의", "투자목적", "및", "전략", "투자전략"]);
+  function stripLabelEdgeTokens(line) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    let start = 0;
+    let end = tokens.length;
+    while (start < end && LABEL_TOKENS.has(tokens[start])) start++;
+    while (end > start && LABEL_TOKENS.has(tokens[end - 1])) end--;
+    return tokens.slice(start, end).join(" ");
+  }
+  const kept = rawSpan.split("\n")
+    .map(line => stripLabelEdgeTokens(line))
+    .filter(line => line.length > 0);
   if (kept.length === 0) return null;
   const cleaned = cleanFundCharParagraph(kept.join(" "));
   return cleaned || null;

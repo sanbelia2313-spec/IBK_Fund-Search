@@ -215,18 +215,61 @@ function fcExtractTrustee(text) {
   );
 }
 
+// 헤딩 정규식에 매칭되는 모든 위치를 등장 순서대로 훑어서, 그 뒤 headingWindow 안에
+// labelRe(예: "회사명")가 나오는지 먼저 확인하고, 나온다면 그 라벨 바로 뒤 valueWindow 안에서만
+// 옵션 목록과 대조한다. fcFindOptionNearMatches와 달리 "라벨 뒤"라는 구조까지 확인하므로,
+// 같은 섹션 안에 다른 회사명(집합투자업자/신탁업자/채권평가회사 등)이 섞여 있어도 엉뚱한 회사명을
+// 집어내지 않는다. (fcExtractTrusteeFromProspectus에서 검증된 방식을 일반화한 것)
+function fcFindLabelValueNearMatches(text, headingRe, labelRe, options, headingWindow, valueWindow) {
+  const indices = fcFindAllMatches(text, headingRe);
+  for (const idx of indices) {
+    const after = text.slice(idx, idx + headingWindow);
+    const labelMatch = after.match(labelRe);
+    if (!labelMatch) continue;
+    const from = labelMatch.index + labelMatch[0].length;
+    const found = fcMatchOption(after.slice(from, from + valueWindow), options);
+    if (found) return found;
+  }
+  return null;
+}
+
+// (2026-07-29 수정) 기존 방식(헤딩 뒤 400자 안에서 옵션 목록과 막바로 대조)은 "제4부"
+// 섹션 안에 집합투자업자/신탁업자/일반사무관리회사/채권평가회사 등 여러 회사명이 근접해서
+// 나오는 문서에서, 엉뚱한 다른 회사명을 사무수탁사로 잘못 집어내는 문제가 있었음.
+// 신탁업자 추출(fcExtractTrusteeFromProspectus)과 동일하게 "헤딩 → 회사명 라벨 → 그 바로
+// 뒤 값"의 구조를 직접 확인해서 값을 뽑도록 바꿔 안정성을 높였다.
 function fcExtractAdminCompany(text) {
-  // 1차: "일반사무관리회사에 관한 사항" 처럼 "관한"이 붙는 헤딩 (KB 스타일)
-  const found1 = fcFindOptionNearMatches(
+  const labelRe = new RegExp(loosePattern("회사명"));
+
+  // 1차: "제4부 ... N. 집합투자재산 관리에 관한 사항(일반사무관리회사)" 처럼 신탁업자와 동일한
+  // 괄호형 헤딩 구조 (표준 투자설명서 서식). 헤딩 바로 뒤 "회사명" 라벨 뒤의 값만 채택.
+  const found1 = fcFindLabelValueNearMatches(
     text,
-    new RegExp(loosePattern("일반사무관리회사") + "[\\s\\S]{0,15}" + loosePattern("관한")),
-    FC_ADMIN_OPTIONS,
-    400
+    new RegExp(loosePattern("관리에 관한 사항") + "[\\s\\S]{0,10}" + loosePattern("일반사무관리회사")),
+    labelRe, FC_ADMIN_OPTIONS, 300, 60
   );
   if (found1) return found1;
-  // 2차: "나. 일반사무관리회사" 처럼 "관한" 없이 회사명이 바로 뒤에 나오는 헤딩 (하나펀드서비스 스타일 등)
-  // "일반사무관리회사"라는 단어 자체는 문서 여러 곳(연대책임 조항 등)에 등장하지만,
-  // fcFindOptionNearMatches가 실제 회사명이 뒤따르는 위치만 채택하므로 안전하다.
+
+  // 2차: "일반사무관리회사에 관한 사항" 처럼 "관한"이 붙는 헤딩 (KB 스타일). 역시 "회사명" 라벨 뒤만 채택.
+  const found2 = fcFindLabelValueNearMatches(
+    text,
+    new RegExp(loosePattern("일반사무관리회사") + "[\\s\\S]{0,15}" + loosePattern("관한")),
+    labelRe, FC_ADMIN_OPTIONS, 300, 60
+  );
+  if (found2) return found2;
+
+  // 3차: "나. 일반사무관리회사" 처럼 "관한" 없이 헤딩만 있고 바로 뒤에 "회사명" 라벨이 오는 경우
+  // (하나펀드서비스 스타일 등). "일반사무관리회사"라는 단어는 문서 여러 곳(연대책임 조항 등)에도
+  // 등장하므로 모든 등장 위치를 순서대로 시도해서, 실제로 "회사명" 라벨이 뒤따르는 위치만 채택한다.
+  const found3 = fcFindLabelValueNearMatches(
+    text,
+    new RegExp(loosePattern("일반사무관리회사")),
+    labelRe, FC_ADMIN_OPTIONS, 300, 60
+  );
+  if (found3) return found3;
+
+  // 4차(최후수단, 구버전 호환): "회사명" 라벨 구조 자체를 전혀 못 찾은 문서일 때만
+  // 기존의 넓은 창(400자) 탐색으로 대체한다.
   return fcFindOptionNearMatches(
     text,
     new RegExp(loosePattern("일반사무관리회사")),
