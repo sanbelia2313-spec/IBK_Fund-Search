@@ -291,7 +291,8 @@ function feeAnalyzeRegion(region, codesByLengthDesc, knownCodes) {
     if (r.tokens.length < 2) continue;
     const code = extractRowCodeFromLabelLine(r.label) ||
       (isCodeLikeToken(r.label) ? r.label : null) ||
-      extractTrailingKnownCode(r.label, codesByLengthDesc);
+      extractTrailingKnownCode(r.label, codesByLengthDesc) ||
+      r.inlineCode || null;
     if (code) candidateRows.push({ code, tokens: r.tokens });
   }
   if (!candidateRows.length) return { parsed: [], commonTriple: null };
@@ -601,12 +602,38 @@ function frontLoadFeeDebugDump() {
 }
 window.frontLoadFeeDebugDump = frontLoadFeeDebugDump;
 
+// (2026-07-29 추가) 헤딩 문구("집합투자기구에 부과되는 보수 및 비용" 등)가 실제 표 제목뿐 아니라
+// 완전히 무관한 각주에도 똑같이 등장하는 경우가 실제로 확인됨 — 예: "...비교지수의 수익률에는
+// 운용보수 등 집합투자기구에 부과되는 보수 및 비용이 반영되지 않았습니다." (투자실적 각주, 표보다
+// 훨씬 앞쪽인 요약정보 부분에 나옴). 예전처럼 "첫 번째 매치"만 쓰면 이런 각주에 걸려서 완전히
+// 엉뚱한 위치(운용전문인력 표, 과세 조항 등)를 표 영역으로 잘못 잡아버리는 문제가 있었음.
+// → 같은 문구가 여러 번 나오면, 그 중 바로 뒤에 "지급비율" 라벨이나 실제 보수율처럼 보이는
+// 소수넷째자리 숫자(예: 0.7446)가 붙어 있는 위치만 "진짜 표"로 인정하고, 그런 위치가 하나도
+// 없으면 안전하게 첫 매치로 돌아간다(기존 동작 유지).
+function findVerifiedAnchorIndex(text, phrase) {
+  const re = new RegExp(loosePattern(phrase), "g");
+  const indices = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    indices.push(m.index);
+    if (m[0].length === 0) re.lastIndex++; // 빈 매칭 무한루프 방지
+  }
+  if (!indices.length) return -1;
+  const tableSignalRe = new RegExp(loosePattern("지급비율"));
+  const numericSignalRe = /\d\.\d{4}/; // 실제 보수율 표는 소수넷째자리(예: 0.7446)로 적힘
+  for (const idx of indices) {
+    const nearby = text.slice(idx, idx + 400);
+    if (tableSignalRe.test(nearby) || numericSignalRe.test(nearby)) return idx;
+  }
+  return indices[0];
+}
+
 function findFeeTableRegion() {
   if (typeof searchableText === "undefined" || !searchableText) return null;
 
   for (const anchor of FEE_TABLE_PRIMARY_ANCHORS) {
-    const m = searchableText.match(new RegExp(loosePattern(anchor)));
-    if (m) return searchableText.slice(m.index, m.index + FEE_TABLE_WINDOW);
+    const idx = findVerifiedAnchorIndex(searchableText, anchor);
+    if (idx !== -1) return searchableText.slice(idx, idx + FEE_TABLE_WINDOW);
   }
 
   // 위 앵커가 전부 실패한 경우에만 fallback 사용.
@@ -674,6 +701,16 @@ function looksLikeFeeRowStart(token) {
 // 서식(예: "A", "A-E", "C-W" ...)에서 다음 행의 시작을 인식하기 위해 필요함 — 2026-07-16 확인
 // (해당 서식에는 FEE_ROW_START_MARKERS("수수료선취" 등) 접두어도, "(코드)" 괄호도 전혀 없어서
 // 기존 로직으로는 다음 행 라벨이 이전 행 라벨 뒤에 계속 이어붙어 파싱이 통째로 깨졌었음).
+// (2026-07-29 수정) 지금까지는 코드가 "(A)"처럼 라벨 끝에 괄호로 붙거나, 숫자 데이터가 다
+// 끝난 뒤(afterdata)에 코드 하나만 단독으로 다음 행 시작을 알리는 두 가지 서식만 지원했음.
+// 그런데 일부 문서(이번에 확인된 하나자산운용 서식 등)는 라벨이 숫자 데이터보다 "먼저" 나오는
+// 도중에 코드가 끼어 있음: "수수료선취-오프 A 0.7446 0.7374 ... 0.3546 라인" 처럼 라벨 앞부분
+// → 코드 → 숫자 10개 → 라벨 뒷부분 순서. 이 경우 코드 토큰이 label 문자열 안에 그대로
+// 파묻혀버려서(예: "수수료선취-오프A라인") 기존의 두 방식 모두 코드를 못 찾아 해당 문서의
+// 보수율이 전 클래스에 걸쳐 하나도 채워지지 않는 문제가 있었음. 그래서 숫자 데이터가 시작되기
+// "전"(label 수집 단계)에도, 토큰이 현재 펀드의 실제 클래스 코드와 정확히 일치하면 그 값을
+// inlineCode로 별도 보관해두고(라벨 문자열 자체는 그대로 이어붙이되), 다른 방식으로 코드를
+// 못 찾았을 때 최후수단으로 이 inlineCode를 사용한다.
 function buildFeeTableRows(region, knownCodes) {
   const cleaned = stripPageArtifacts(region);
   const tokens = cleaned.split(/\s+/).filter(Boolean);
@@ -682,11 +719,12 @@ function buildFeeTableRows(region, knownCodes) {
   let numbers = [];
   let mode = "label"; // "label": 숫자데이터 이전, "afterdata": 숫자데이터 수집 중/이후
   let suffixCount = 0;
+  let inlineCode = null;
   const SUFFIX_CAP = 4;
 
   function finalizeRow() {
-    if (label || numbers.length) rows.push({ label, tokens: numbers });
-    label = ""; numbers = []; mode = "label"; suffixCount = 0;
+    if (label || numbers.length) rows.push({ label, tokens: numbers, inlineCode });
+    label = ""; numbers = []; mode = "label"; suffixCount = 0; inlineCode = null;
   }
 
   for (const t of tokens) {
@@ -715,6 +753,9 @@ function buildFeeTableRows(region, knownCodes) {
         }
       }
     } else {
+      // 숫자 데이터가 시작되기 전(label 수집 단계)인데 지금 토큰이 실제 클래스 코드와 정확히
+      // 일치하면, 뒤에 라벨 텍스트가 더 이어지더라도 이 값을 이번 행의 코드로 기억해둔다.
+      if (knownCodes && knownCodes.has(normalizeCodeKey(t))) inlineCode = t;
       label += t;
     }
   }
@@ -960,65 +1001,83 @@ function extractFeeMatrixTable(knownCodes) {
   return merged;
 }
 
+// (2026-07-29 수정) 1차 매트릭스 파서(extractFeeMatrixTable)는 PDF 글자 좌표(x,y)를 직접 다루는
+// 코드라, 문서 레이아웃이 조금만 예상과 달라도 예외가 날 수 있다. 지금까지는 이 예외를 그대로
+// 던져버려서(try/catch 없음) 1차가 실패하면 이미 검증된 2차(텍스트 기반) 파서까지 아예 실행되지
+// 못하고 보수율 전체가 "미입력"으로 비어버리는 문제가 있었다. 1차는 어디까지나 "되면 더 정확한"
+// 보너스 경로일 뿐이므로, 여기서 예외가 나도 2차로 안전하게 넘어가도록 감싼다. computeFeeTableValues
+// 전체도 한 번 더 감싸서, 예상 못 한 어떤 오류가 나도 보수율만 "못 찾음"으로 처리되고 나머지
+// 자동채움 항목들에는 영향이 없도록 한다.
 function computeFeeTableValues() {
-  const resolvedCode = getResolvedClassCode();
-  if (!resolvedCode) return null;
+  try {
+    const resolvedCode = getResolvedClassCode();
+    if (!resolvedCode) return null;
 
-  const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
+    const activeCodes = Array.from(new Set(getActiveClassTable().map(e => e.code)));
 
-  // 1차: 매트릭스형(클래스 가로배치) 보수표 시도 — 뽑히면 이걸 우선 사용.
-  const matrixTable = extractFeeMatrixTable(activeCodes);
-  if (matrixTable) {
-    const matrixKey = Object.keys(matrixTable).find(c => normalizeCodeKey(c) === normalizeCodeKey(resolvedCode));
-    const row = matrixKey ? matrixTable[matrixKey] : null;
-    if (row && (row.total !== undefined || row.sale !== undefined)) {
-      const values = {};
-      if (row.sale !== undefined) values.saleFeeRate = feeToDisplay(row.sale);
-      if (row.total !== undefined) values.totalFee = feeToDisplay(row.total);
-      if (row.synthetic !== undefined) values.syntheticFee = feeToDisplay(row.synthetic);
-      if (row.manage !== undefined) values.manageFeeRate = feeToDisplay(row.manage);
-      if (row.trustee !== undefined) values.trusteeFeeRate = feeToDisplay(row.trustee);
-      if (row.admin !== undefined) values.adminFeeRate = feeToDisplay(row.admin);
-      const m = feeToNum(row.manage), t = feeToNum(row.trustee), a = feeToNum(row.admin);
-      const s = feeToNum(row.sale), tot = feeToNum(row.total);
-      const confident = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
-      return { values, confident };
+    // 1차: 매트릭스형(클래스 가로배치) 보수표 시도 — 뽑히면 이걸 우선 사용. 실패(예외 포함)하면 2차로 폴백.
+    let matrixTable = null;
+    try {
+      matrixTable = extractFeeMatrixTable(activeCodes);
+    } catch (e) {
+      console.warn("[보수율] 매트릭스 파서(1차)에서 오류 발생 — 텍스트 파서(2차)로 폴백합니다.", e);
+      matrixTable = null;
     }
-    // 매트릭스 표는 찾았지만 이 클래스 행을 못 찾았으면(예: 표에 없는 코드) 아래 텍스트 기반으로 폴백
+    if (matrixTable) {
+      const matrixKey = Object.keys(matrixTable).find(c => normalizeCodeKey(c) === normalizeCodeKey(resolvedCode));
+      const row = matrixKey ? matrixTable[matrixKey] : null;
+      if (row && (row.total !== undefined || row.sale !== undefined)) {
+        const values = {};
+        if (row.sale !== undefined) values.saleFeeRate = feeToDisplay(row.sale);
+        if (row.total !== undefined) values.totalFee = feeToDisplay(row.total);
+        if (row.synthetic !== undefined) values.syntheticFee = feeToDisplay(row.synthetic);
+        if (row.manage !== undefined) values.manageFeeRate = feeToDisplay(row.manage);
+        if (row.trustee !== undefined) values.trusteeFeeRate = feeToDisplay(row.trustee);
+        if (row.admin !== undefined) values.adminFeeRate = feeToDisplay(row.admin);
+        const m = feeToNum(row.manage), t = feeToNum(row.trustee), a = feeToNum(row.admin);
+        const s = feeToNum(row.sale), tot = feeToNum(row.total);
+        const confident = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
+        return { values, confident };
+      }
+      // 매트릭스 표는 찾았지만 이 클래스 행을 못 찾았으면(예: 표에 없는 코드) 아래 텍스트 기반으로 폴백
+    }
+
+    // 2차: 기존 텍스트 기반(클래스당 한 행) 파서
+    const region = findFeeTableRegion();
+    if (!region) return null;
+
+    // 현재(감지된) 회사의 실제 코드 목록 — 코드 단독 라벨 서식에서 행 시작을 인식하고,
+    // 헤더 텍스트가 앞에 붙은 라벨에서도 실제 코드를 뽑아내기 위해 필요함.
+    const knownCodes = new Set(activeCodes.map(c => normalizeCodeKey(c)));
+    const codesByLengthDesc = activeCodes.slice().sort((a, b) => b.length - a.length);
+
+    const { parsed, commonTriple } = feeAnalyzeRegion(region, codesByLengthDesc, knownCodes);
+    const entry = findParsedFeeEntry(parsed, resolvedCode);
+    if (!entry) return null;
+
+    const values = {};
+    if (entry.row.sale !== undefined) values.saleFeeRate = feeToDisplay(entry.row.sale);
+    if (entry.row.total !== undefined) values.totalFee = feeToDisplay(entry.row.total);
+    if (entry.row.synthetic !== undefined) values.syntheticFee = feeToDisplay(entry.row.synthetic);
+
+    // 운용사/신탁업자/일반사무관리보수: 이 행 자체에 값이 있으면(표준 10칸/공통값이 이 행에 낀
+    // 경우) 그 값을 그대로 쓰고, 없으면(간략 7칸 행) 표 전체에서 검증된 공통값으로 채운다.
+    const triple = entry.tripleFromSelf || commonTriple;
+    let confident = false;
+    if (triple) {
+      values.manageFeeRate = feeToDisplay(triple.manage);
+      values.trusteeFeeRate = feeToDisplay(triple.trustee);
+      values.adminFeeRate = feeToDisplay(triple.admin);
+      const m = feeToNum(triple.manage), t = feeToNum(triple.trustee), a = feeToNum(triple.admin);
+      const s = feeToNum(entry.row.sale), tot = feeToNum(entry.row.total);
+      confident = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
+    }
+
+    return { values, confident };
+  } catch (e) {
+    console.warn("[보수율] computeFeeTableValues에서 예상치 못한 오류가 발생해 '못 찾음'으로 처리합니다.", e);
+    return null;
   }
-
-  // 2차: 기존 텍스트 기반(클래스당 한 행) 파서
-  const region = findFeeTableRegion();
-  if (!region) return null;
-
-  // 현재(감지된) 회사의 실제 코드 목록 — 코드 단독 라벨 서식에서 행 시작을 인식하고,
-  // 헤더 텍스트가 앞에 붙은 라벨에서도 실제 코드를 뽑아내기 위해 필요함.
-  const knownCodes = new Set(activeCodes.map(c => normalizeCodeKey(c)));
-  const codesByLengthDesc = activeCodes.slice().sort((a, b) => b.length - a.length);
-
-  const { parsed, commonTriple } = feeAnalyzeRegion(region, codesByLengthDesc, knownCodes);
-  const entry = findParsedFeeEntry(parsed, resolvedCode);
-  if (!entry) return null;
-
-  const values = {};
-  if (entry.row.sale !== undefined) values.saleFeeRate = feeToDisplay(entry.row.sale);
-  if (entry.row.total !== undefined) values.totalFee = feeToDisplay(entry.row.total);
-  if (entry.row.synthetic !== undefined) values.syntheticFee = feeToDisplay(entry.row.synthetic);
-
-  // 운용사/신탁업자/일반사무관리보수: 이 행 자체에 값이 있으면(표준 10칸/공통값이 이 행에 낀
-  // 경우) 그 값을 그대로 쓰고, 없으면(간략 7칸 행) 표 전체에서 검증된 공통값으로 채운다.
-  const triple = entry.tripleFromSelf || commonTriple;
-  let confident = false;
-  if (triple) {
-    values.manageFeeRate = feeToDisplay(triple.manage);
-    values.trusteeFeeRate = feeToDisplay(triple.trustee);
-    values.adminFeeRate = feeToDisplay(triple.admin);
-    const m = feeToNum(triple.manage), t = feeToNum(triple.trustee), a = feeToNum(triple.admin);
-    const s = feeToNum(entry.row.sale), tot = feeToNum(entry.row.total);
-    confident = ![m, t, a, s, tot].some(Number.isNaN) && Math.abs((m + t + a + s) - tot) < 0.02;
-  }
-
-  return { values, confident };
 }
 
 // 콘솔 디버그용: 개발자도구(F12)에서 feeDebugDump() 실행하면 지금 인식된 보수표의
@@ -1038,7 +1097,8 @@ function feeDebugDump() {
   rows.forEach((r, i) => {
     const code = extractRowCodeFromLabelLine(r.label) ||
       (isCodeLikeToken(r.label) ? r.label : null) ||
-      extractTrailingKnownCode(r.label, codesByLengthDesc);
+      extractTrailingKnownCode(r.label, codesByLengthDesc) ||
+      r.inlineCode || null;
     console.log(
       "  #" + i, "code=" + (code || "(인식실패)"),
       "tokens=" + JSON.stringify(r.tokens),

@@ -747,12 +747,90 @@ function ctExtractMatrixPage(pageItems) {
   return results.filter(r => CT_VALID_CODE_RE.test(r.code));
 }
 
+// ------------------------------------------------------------
+// 행라벨형 매트릭스 파서 (ctExtractRowLabelMatrixPage) — 2026-08-04 추가, IBK자산운용 등
+// ------------------------------------------------------------
+// ctExtractMatrixPage는 헤더 셀이 "종류A"처럼 "종류"+코드로 이미 분리돼 있는 경우만 헤더로
+// 인식한다. 그런데 IBK자산운용처럼 "(종류)클래스"/"한국금융투자협회 펀드코드"라는 별도의 행
+// 라벨(왼쪽 첫 칸)을 두고, 그 옆에 나열되는 각 칸에는 코드가 별도 토큰이 아니라 설명 문구
+// 끝에 괄호로 붙어있는("수수료선취-오프라인(A)") 형태의 표가 있다. 이 경우 "종류" 마커가
+// 아예 없어서 ctExtractMatrixPage가 헤더 자체를 못 찾고, 기존 2열(좌우) 폴백도 "펀드코드"가
+// 한 페이지에 3번 이상 세로로 반복(=블록이 옆이 아니라 아래로 쌓임)되는 이 구조를 다루지
+// 못해서 fundCode가 전부 빈 값으로 남는다.
+//
+// 이 파서는 "종류" 마커 대신 "펀드코드로 보이는 값(영숫자 4~8자, 숫자 포함)이 한 행(y)에
+// 3개 이상 나열돼 있다"는 사실만으로 각 블록의 기준행(펀드코드행)을 찾고, 그 x좌표들을 열
+// 경계로 삼아 그 바로 위쪽(다음 블록의 펀드코드행보다는 아래, 즉 그 사이 구간)에 있는 글자
+// 조각들을 가장 가까운 열에 배정해 설명을 재구성한다. 왼쪽 행라벨("(종류)클래스",
+// "한국금융투자협회" 등)은 데이터 열들보다 x가 훨씬 작아서 열 배정 시(허용거리 안에 없으면
+// 버림) 자연히 제외된다.
+function ctExtractRowLabelMatrixPage(pageItems) {
+  const yGroups = ctGroupByY(pageItems, 1.5);
+  const fundCodeRows = [];
+  yGroups.forEach(g => {
+    const dataItems = g.items.filter(it => it.x > 100);
+    const codeLike = dataItems.filter(it => /^[A-Za-z0-9]{4,8}$/.test(it.str) && /[0-9]/.test(it.str));
+    // 그 행의 x>100 조각들이 전부(=다른 잡음 없이) 펀드코드 형태이고 3개 이상이어야 인정
+    if (codeLike.length >= 3 && codeLike.length === dataItems.length) {
+      fundCodeRows.push({ y: g.y, cols: codeLike.slice().sort((a, b) => a.x - b.x) });
+    }
+  });
+  if (fundCodeRows.length === 0) return [];
+  fundCodeRows.sort((a, b) => b.y - a.y); // 페이지 위쪽(y 큰 값)부터
+
+  const results = [];
+  fundCodeRows.forEach((row, i) => {
+    const prevY = i > 0 ? fundCodeRows[i - 1].y : Infinity;
+    // 설명구간 상한: 바로 앞 블록의 펀드코드행보다는 아래, 그리고 이 블록 자체를 벗어나지
+    // 않도록 넉넉히 50pt로 캡(실측상 블록 하나의 높이가 이보다 작음 — 그 이상 벌어지면
+    // 문서 제목/펀드명 등 표와 무관한 윗줄까지 섞여 들어올 위험이 있어서 캡을 둠).
+    const upper = Math.min(prevY, row.y + 50);
+    const lower = row.y + 0.5; // 이 블록 자신의 펀드코드행 줄은 설명구간에서 제외
+    const zoneItems = pageItems.filter(it => it.y > lower && it.y < upper && it.x > 100);
+
+    const cols = row.cols;
+    const xs = cols.map(c => c.x);
+    const gaps = [];
+    for (let k = 1; k < xs.length; k++) gaps.push(xs[k] - xs[k - 1]);
+    const typicalGap = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : 70;
+    const maxColDist = Math.max(typicalGap / 2 + 4, 20);
+
+    const buckets = cols.map(c => ({ x: c.x, fundCode: c.str, parts: [] }));
+    ctGroupByY(zoneItems, 1.5).sort((a, b) => b.y - a.y).forEach(lg => {
+      lg.items.slice().sort((a, b) => a.x - b.x).forEach(it => {
+        let best = null, bestDist = Infinity;
+        buckets.forEach(b => { const d = Math.abs(b.x - it.x); if (d < bestDist) { bestDist = d; best = b; } });
+        if (best && bestDist <= maxColDist) best.parts.push(it.str);
+      });
+    });
+
+    buckets.forEach(b => {
+      let desc = b.parts.join("").replace(/\s+/g, "");
+      let code = "";
+      // 코드가 설명 끝에 괄호로 붙어있는 형태("...무권유저비용(AG)")이므로 마지막 괄호
+      // 그룹(중첩 1단계까지 허용)을 코드로 떼어냄
+      const trailingParen = desc.match(/\(([^()]*(?:\([^()]*\))?[^()]*)\)$/);
+      if (trailingParen) {
+        code = trailingParen[1];
+        desc = desc.slice(0, trailingParen.index);
+      }
+      results.push({ code, desc, fundCode: b.fundCode });
+    });
+  });
+
+  return results.filter(r => CT_VALID_CODE_RE.test(r.code));
+}
+
 function ctExtractPage(pageItems) {
   // 먼저 매트릭스형(클래스 가로배치) 표인지 시도해보고, 뽑히면 그걸 우선 사용.
-  // 못 뽑히면(=이 페이지는 매트릭스형이 아님) 기존의 행 기반 파서로 넘어감.
   const matrixRows = ctExtractMatrixPage(pageItems);
   if (matrixRows.length > 0) return matrixRows;
 
+  // 다음으로 행라벨형 매트릭스(IBK자산운용 등, "종류" 마커 없이 괄호로 코드가 붙는 형태)를 시도.
+  const rowLabelMatrixRows = ctExtractRowLabelMatrixPage(pageItems);
+  if (rowLabelMatrixRows.length > 0) return rowLabelMatrixRows;
+
+  // 둘 다 못 뽑히면(=이 페이지는 매트릭스형이 아님) 기존의 행 기반 파서로 넘어감.
   const headerItem = pageItems.find(it => it.str.includes("펀드코드"));
   if (!headerItem) return [];
 
