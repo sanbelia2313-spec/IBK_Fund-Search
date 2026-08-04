@@ -96,9 +96,13 @@ section h2::after{content:""; height:1px; flex:1; background:var(--line-soft);}
 
 /* 넓은 화면에서 아래로 내려온 3번째 section 내부: 좁은 오른쪽 칸 전용으로 짜여있던 카드들이
    전체폭에서 너무 헐렁해 보이지 않도록, 그 안의 pn-card들을 나란히 배치할 폭 상한을 둠 */
+/* 예전엔 900px로 제한해서, #commonInfoForm의 "장마감전/후 거래일수" 한 줄짜리 내용이
+   항상 가로 스크롤로 밀려나는 문제가 있었음. 그 카드 하나만 예외로 넓히니 다른 카드들과
+   폭이 안 맞아 화면이 어색해 보인다는 피드백(2026-08-04)에 따라, section 3의 모든
+   카드에 공통으로 넓은 폭을 적용하도록 되돌림. */
 main > section:nth-of-type(3) > .pn-card,
 main > section:nth-of-type(3) > #individualInfoForm{
-  max-width:900px;
+  max-width:1200px;
 }
 
 /* ---- 왼쪽: 업로드 ---- */
