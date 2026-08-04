@@ -479,14 +479,43 @@ function tryExtractFrontLoadFromRegion(cleaned, code) {
   return null;
 }
 
-// "(코드)" 바로 뒤에 오는 값 한 칸만 본다 — 그 칸이 "-"면 선취 대상이 아님(null), 숫자%면
-// 그 값을 반환. "이내"/"이하"가 붙어 있으면 그대로 살리고, 없으면 안 붙인다.
+// "(코드)" 가 속한 표 행 블록 안에서 값을 찾는다 — 그 칸이 "-"면 선취 대상이 아님(null),
+// 숫자%면 그 값을 반환. "이내"/"이하"가 붙어 있으면 그대로 살리고, 없으면 안 붙인다.
+// (2026-08-04 수정, 2차) 처음엔 값이 항상 "(코드)" 바로 뒤에 온다고 가정했는데, 실제 앱에서
+// PDF.js가 뽑아내는 순서를 콘솔로 직접 까보니(IBK자산운용 PDF로 확인) 아래처럼 값이 코드보다
+// "앞"에 오는 행도 있었다(라벨이 "수수료선취-오프라인-고액" + 코드 "(B)"로 두 줄에 걸쳐 있고,
+// 다른 칸들(후취/환매/전환)의 "없음"이 값과 코드 사이에 끼어들면서 순서가 뒤섞임):
+//   수수료선취-오프라인
+//   납입금액의 0.5%이내    없음    없음    없음
+//   -고액(B)
+// 코드 바로 뒤/바로 앞만 보는 방식으로는 이런 문서를 절반(A/Ae는 되고 B/AG 등은 안 됨)만
+// 잡아서, 대신 "이 행이 어디서 시작해서 어디서 끝나는지"부터 먼저 찾는다. 표의 각 행은 항상
+// FEE_ROW_START_MARKERS(수수료선취/후취/미징구/선후취)로 시작하므로, "(코드)"가 나온 위치의
+// 앞뒤에서 가장 가까운 시작 마커 두 개를 찾아 그 사이를 "이 행 전체"로 보고, 그 안에서
+// "납입금액의 N%"를 순서와 무관하게 찾는다 — 같은 행 안에만 있으면 되므로 코드와 값의 정확한
+// 앞뒤 순서를 몰라도 안전하게 잡힌다(다른 행 값을 잘못 끌어올 위험 없음).
 function computeFrontLoadFeeFromDirectTable(code) {
   const region = findDirectFeeTableRegion();
   if (!region) return null;
   const codeMarker = "(" + code + ")";
   const idx = region.indexOf(codeMarker);
   if (idx !== -1) {
+    let blockStart = 0;
+    FEE_ROW_START_MARKERS.forEach(marker => {
+      const pos = region.lastIndexOf(marker, idx);
+      if (pos !== -1 && pos > blockStart) blockStart = pos;
+    });
+    let blockEnd = region.length;
+    FEE_ROW_START_MARKERS.forEach(marker => {
+      const pos = region.indexOf(marker, idx + 1);
+      if (pos !== -1 && pos < blockEnd) blockEnd = pos;
+    });
+    const block = region.slice(blockStart, blockEnd);
+
+    const rowVal = block.match(/납입금액의\s*([0-9]+(?:\.[0-9]+)?)\s*%(?:\s*(?:이내|이하))?/);
+    if (rowVal) return "납입금액의 " + rowVal[1] + "%" + (/이내/.test(rowVal[0]) ? "이내" : "");
+
+    // 접두어("납입금액의") 없이 "(코드)" 바로 뒤에 숫자%만 오는 문서(기존 KB 등)용 폴백
     const after = region.slice(idx + codeMarker.length, idx + codeMarker.length + 40);
     const m = after.match(/^\s*(-|[0-9]+(?:\.[0-9]+)?\s*%(?:\s*(?:이내|이하))?)/);
     if (m && m[1] !== "-") {
