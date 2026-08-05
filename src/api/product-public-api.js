@@ -158,8 +158,119 @@ function determineFundType(prdClsfCd) {
   return FUND_TYPE_BY_2ND_CODE[code2] || null;
 }
 
-// srtnCd(단축코드) 하나를 정확히 조회. 단축코드 조회이므로 결과는 0건 아니면 1건이어야 정상.
-// (혹시 여러 건이 오는 비정상 상황이면 그냥 첫 번째를 씀 — 이 API는 srtnCd 단위로 유일해야 함)
+// ------------------------------------------------------------
+// 공공데이터 API 결과코드(에러코드) 공통 처리 — 2026-08-05 추가
+// ------------------------------------------------------------
+// 활용가이드 문서의 "2. OpenAPI 에러 코드정리" 표를 그대로 옮김. 이 중 사람이 data.go.kr에
+// 가서 직접 조치해야 하는 코드(활용기간 만료, 서비스키 미등록 등)는 ACTIONABLE_ERROR_MSG에
+// 안내 문구까지 같이 적어둠 — 화면 배너에 그대로 쓰임.
+const API_ERROR_LABEL = {
+  "1": "APPLICATION_ERROR (어플리케이션 에러)",
+  "10": "INVALID_REQUEST_PARAMETER_ERROR (잘못된 요청 파라메터)",
+  "12": "NO_OPENAPI_SERVICE_ERROR (해당 오픈API서비스가 없거나 폐기됨)",
+  "20": "SERVICE_ACCESS_DENIED_ERROR (서비스 접근거부)",
+  "22": "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR (요청제한횟수 초과)",
+  "30": "SERVICE_KEY_IS_NOT_REGISTERED_ERROR (등록되지 않은 서비스키)",
+  "31": "DEADLINE_HAS_EXPIRED_ERROR (활용기간 만료)",
+  "32": "UNREGISTERED_IP_ERROR (등록되지 않은 IP)",
+  "99": "UNKNOWN_ERROR (기타 에러)",
+};
+// 코드별로 "사람이 뭘 해야 하는지" 안내문. 없는 코드는 이 안내 없이 코드/설명만 보여줌.
+const ACTIONABLE_ERROR_MSG = {
+  "12": "data.go.kr에서 이 API가 폐기·변경되지 않았는지 확인하세요.",
+  "20": "활용신청이 반려·중지됐을 수 있습니다. data.go.kr 마이페이지에서 상태를 확인하세요.",
+  "22": "일시적인 요청 과다입니다 — 급한 조치는 필요 없고, 잠시 후 다시 시도하면 됩니다.",
+  "30": "인증키가 잘못됐거나 활용신청이 취소된 상태일 수 있습니다. data.go.kr 마이페이지에서 서비스키를 다시 확인하세요.",
+  "31": "활용신청 기간이 만료됐습니다. data.go.kr 마이페이지 → 데이터활용 → Open API → 활용신청 현황에서 연장 신청하세요.",
+  "32": "활용신청 시 등록한 IP와 지금 접속 IP가 다릅니다. data.go.kr 마이페이지에서 등록 IP를 확인하세요.",
+};
+
+// 가장 최근에 겪은 API 결과코드 에러(정상 응답이면 null). fetchFundInfoBySrtnCd/
+// fetchFundInfoByLikeFndNm이 호출할 때마다 갱신되고, publicApiAutoFill이 끝날 때
+// updatePublicApiBanner()가 이걸 읽어서 화면에 띄울지 판단함.
+let PUBLIC_API_LAST_ERROR = null;
+
+// data.go.kr 응답 header를 검사해서 정상(resultCode "00")이 아니면 PUBLIC_API_LAST_ERROR에
+// 기록하고 에러를 던짐. 이전에는 fetchFundInfoBySrtnCd/fetchFundInfoByLikeFndNm 두 곳에
+// 똑같은 코드가 따로 있었는데, 에러코드를 기록해두려면 어차피 한 곳으로 모으는 게 안전함.
+function pubApiCheckHeader(header) {
+  if (header && header.resultCode !== "00") {
+    PUBLIC_API_LAST_ERROR = { code: header.resultCode, msg: header.resultMsg };
+    const label = API_ERROR_LABEL[header.resultCode] || header.resultMsg;
+    throw new Error(`공공데이터 API 오류 [${header.resultCode}] ${label}`);
+  }
+}
+
+// ------------------------------------------------------------
+// 화면 상단 경고 배너 — index.html에 id="publicApiWarningBanner"인 엘리먼트가 있으면 그걸 씀.
+// (엘리먼트가 없어도 에러 없이 그냥 조용히 무시됨 — 배너 자체는 선택적인 UI 보강일 뿐,
+//  없다고 자동채움 흐름이 깨지면 안 되므로)
+// ------------------------------------------------------------
+function showPublicApiWarning(message) {
+  const el = document.getElementById("publicApiWarningBanner");
+  if (!el) return;
+  el.textContent = message;
+  el.style.display = "block";
+}
+function hidePublicApiWarning() {
+  const el = document.getElementById("publicApiWarningBanner");
+  if (el) el.style.display = "none";
+}
+
+// ------------------------------------------------------------
+// 활용기간 만료일 카운트다운 — 2026-08-05 추가
+// ------------------------------------------------------------
+// data.go.kr 마이페이지 → 데이터활용 → Open API → 활용신청 현황에서, 이 서비스("금융위원회_
+// 펀드상품기본정보")의 활용신청 건을 열어보면 "활용기간"이 적혀 있습니다. 그 종료일을
+// 여기 "YYYY-MM-DD" 형식으로 채워두면, 만료 30일 전부터(그리고 만료된 뒤에도) 화면에
+// 경고가 자동으로 뜹니다. 모르면 null로 두세요 — 이 카운트다운만 꺼지고, 위쪽 에러코드
+// 기반 경고(실제로 API가 31번 에러를 돌려줄 때)는 그와 별개로 계속 동작합니다.
+const PUBLIC_API_KEY_EXPIRY = "2028-07-20"; // data.go.kr 마이페이지에서 확인한 실제 활용기간 만료일 (2026-08-05 확인)
+
+function checkPublicApiExpiry() {
+  if (!PUBLIC_API_KEY_EXPIRY) return null;
+  const expiry = new Date(PUBLIC_API_KEY_EXPIRY + "T00:00:00+09:00");
+  if (isNaN(expiry.getTime())) return null;
+  const daysLeft = Math.ceil((expiry.getTime() - Date.now()) / 86400000);
+  return daysLeft;
+}
+
+// 지금 상황(방금 API 에러가 있었는지 + 활용기간이 얼마나 남았는지)을 종합해서 배너를
+// 띄우거나 감춤. publicApiAutoFill이 끝날 때마다(성공/실패 둘 다) 호출되고, 페이지를 처음
+// 열었을 때도(아직 PDF를 안 올려도 만료일 카운트다운은 보이도록) 한 번 호출됨.
+function updatePublicApiBanner() {
+  if (PUBLIC_API_LAST_ERROR) {
+    const code = PUBLIC_API_LAST_ERROR.code;
+    const label = API_ERROR_LABEL[code] || PUBLIC_API_LAST_ERROR.msg;
+    const action = ACTIONABLE_ERROR_MSG[code];
+    showPublicApiWarning(
+      `⚠️ 공공데이터 API 오류 [${code}] ${label}` + (action ? ` — ${action}` : "") +
+      " (지금은 PDF 기반 값만 자동채움에 사용됩니다)"
+    );
+    return;
+  }
+  const daysLeft = checkPublicApiExpiry();
+  if (daysLeft !== null) {
+    if (daysLeft < 0) {
+      showPublicApiWarning(`⚠️ 공공데이터 API 활용신청 기간이 ${Math.abs(daysLeft)}일 전에 만료됐습니다 — data.go.kr 마이페이지에서 연장 신청하세요.`);
+      return;
+    }
+    if (daysLeft <= 30) {
+      showPublicApiWarning(`⏰ 공공데이터 API 활용신청 기간이 ${daysLeft}일 후 만료됩니다 — data.go.kr 마이페이지에서 미리 연장 신청하세요.`);
+      return;
+    }
+  }
+  hidePublicApiWarning();
+}
+// 페이지를 열자마자(PDF 업로드 전에도) 만료 카운트다운을 바로 보여줌.
+if (typeof document !== "undefined") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", updatePublicApiBanner);
+  } else {
+    updatePublicApiBanner();
+  }
+}
+
 async function fetchFundInfoBySrtnCd(srtnCd) {
   if (!srtnCd) return null;
 
@@ -176,9 +287,7 @@ async function fetchFundInfoBySrtnCd(srtnCd) {
   const data = await res.json();
 
   const header = data?.response?.header;
-  if (header && header.resultCode !== "00") {
-    throw new Error(`공공데이터 API 오류 [${header.resultCode}] ${header.resultMsg}`);
-  }
+  pubApiCheckHeader(header);
 
   const rawItems = data?.response?.body?.items?.item;
   if (!rawItems) return null;
@@ -283,9 +392,7 @@ async function fetchFundInfoByLikeFndNm(likeFndNm) {
   const data = await res.json();
 
   const header = data?.response?.header;
-  if (header && header.resultCode !== "00") {
-    throw new Error(`공공데이터 API 오류 [${header.resultCode}] ${header.resultMsg}`);
-  }
+  pubApiCheckHeader(header);
 
   const rawItems = data?.response?.body?.items?.item;
   if (!rawItems) return [];
@@ -508,6 +615,7 @@ function applyKofiaCodeForCurrentClass() {
 // 실패해도(네트워크 오류, 매칭 실패 등) 예외를 던지지 않고 콘솔에만 남긴다 —
 // 공공데이터 조회가 실패해도 나머지(PDF기반) 자동채움 흐름은 막히면 안 되므로.
 async function publicApiAutoFill(classTable) {
+  PUBLIC_API_LAST_ERROR = null; // 이전 실행(다른 PDF)에서 남은 에러 상태가 있으면 지우고 새로 판단
   try {
     // 1) PDF에서 뽑은 펀드코드 후보들로 "앵커" 레코드 하나 확보 시도. 전부 다 맞을 필요는
     // 없음 — 딱 하나만 성공해도, 그 레코드의 fndNm에서 API가 실제로 쓰는 정확한 공백 표기의
@@ -553,6 +661,7 @@ async function publicApiAutoFill(classTable) {
 
     if (!matchedRecords.length) {
       console.warn("[공공데이터] 이름검색/펀드코드 매칭 모두 실패 — 미등록으로 간주, PDF기반 값 유지");
+      updatePublicApiBanner();
       return { applied: [], skipped: ["이름검색/펀드코드 매칭 모두 실패 — API 미등록으로 간주"] };
     }
 
@@ -580,13 +689,18 @@ async function publicApiAutoFill(classTable) {
     if (result.skipped.length) {
       console.warn("[공공데이터] 건너뜀:", result.skipped.join(" / "));
     }
+    updatePublicApiBanner();
     return result;
   } catch (err) {
     console.warn("[공공데이터] 조회 실패:", err.message);
+    updatePublicApiBanner();
     return { applied: [], skipped: [`조회 실패: ${err.message}`] };
   }
 }
 
+window.updatePublicApiBanner = updatePublicApiBanner;
+window.showPublicApiWarning = showPublicApiWarning;
+window.hidePublicApiWarning = hidePublicApiWarning;
 window.fetchFundInfoBySrtnCd = fetchFundInfoBySrtnCd;
 window.fetchFundInfoBySrtnCdWithRetry = fetchFundInfoBySrtnCdWithRetry;
 window.fetchFundInfoByLikeFndNm = fetchFundInfoByLikeFndNm;

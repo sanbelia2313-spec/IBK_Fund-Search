@@ -57,6 +57,17 @@ header p{
   font-size:13px;
   color:var(--ink-soft);
 }
+/* 공공데이터 API 경고 배너 (2026-08-05 추가) — 인증키 에러/활용기간 만료 임박 시에만
+   표시됨(product-public-api.js의 updatePublicApiBanner). 기본은 index.html에서 display:none. */
+#publicApiWarningBanner{
+  background:#FFF4E5;
+  border-bottom:1px solid #F0C36B;
+  color:#8A5A00;
+  font-size:13px;
+  font-weight:600;
+  padding:10px 22px;
+  text-align:center;
+}
 .stat-row{
   display:flex;
   gap:22px;
@@ -102,7 +113,7 @@ section h2::after{content:""; height:1px; flex:1; background:var(--line-soft);}
    카드에 공통으로 넓은 폭을 적용하도록 되돌림. */
 main > section:nth-of-type(3) > .pn-card,
 main > section:nth-of-type(3) > #individualInfoForm{
-  max-width:1200px;
+  max-width:1700px;
 }
 
 /* ---- 왼쪽: 업로드 ---- */
