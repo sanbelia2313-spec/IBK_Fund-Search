@@ -225,7 +225,8 @@ function hidePublicApiWarning() {
 // 여기 "YYYY-MM-DD" 형식으로 채워두면, 만료 30일 전부터(그리고 만료된 뒤에도) 화면에
 // 경고가 자동으로 뜹니다. 모르면 null로 두세요 — 이 카운트다운만 꺼지고, 위쪽 에러코드
 // 기반 경고(실제로 API가 31번 에러를 돌려줄 때)는 그와 별개로 계속 동작합니다.
-const PUBLIC_API_KEY_EXPIRY = "2028-07-20"; // data.go.kr 마이페이지에서 확인한 실제 활용기간 만료일 (2026-08-05 확인)
+// data.go.kr 마이페이지에서 확인한 실제 활용기간 만료일 (2026-08-05 확인)
+const PUBLIC_API_KEY_EXPIRY = "2028-07-20";
 
 function checkPublicApiExpiry() {
   if (!PUBLIC_API_KEY_EXPIRY) return null;
